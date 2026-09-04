@@ -1,0 +1,735 @@
+// token-gobbler · tests (node --test). Self-contained: uses temp dirs, not ~/.dsh.
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { existsSync, mkdtempSync, writeFileSync, mkdirSync, statSync, utimesSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { zstdCompressSync } from "node:zlib";
+
+import { priceFor, costFor, costBreakdown, modelKey, priceForProvider, isCopilotProvider, LOCAL_QWEN_KEY } from "../lib/pricing.js";
+import { attributeSession } from "../lib/report.js";
+import { parseTrajectoryText, readTrajectory, parseStatsSnapshot } from "../lib/trajectory.js";
+import { readProjcache } from "../lib/projcache.js";
+import { buildReport, priceTotals, buildBreakdown, buildPerformance, addSavings, resolvePaths, loadPricing, savePricing, pricingFilePath } from "../lib/report.js";
+import { builtinEntries, setRuntimeTable } from "../lib/pricing.js";
+
+// ── pricing ──────────────────────────────────────────────────────────────
+test("priceFor: exact + normalized + bedrock", () => {
+  assert.equal(priceFor("claude-sonnet-4.6").input, 3);
+  assert.equal(priceFor("anthropic.claude-sonnet-4-6").input, 3);
+  assert.equal(priceFor("eu.anthropic.claude-opus-4-5-v1").output, 25);
+  assert.equal(priceFor("claude-opus-4.6").output, 25);
+});
+
+test("priceFor: Qwen local is metered", () => {
+  for (const m of ["Qwen3.8-27B-Q6-GGUF", "Qwen3.8-27B-MLX-4bit", "qwen3.8-27b"]) {
+    const c = priceFor(m);
+    assert.ok(c, m);
+    assert.equal(c.input, 0.25);
+    assert.equal(c.output, 2.5);
+    assert.equal(c.cacheRead, 0.05);
+  }
+});
+
+test("priceFor: other local models are free", () => {
+  for (const m of ["llama-3-8b", "gemma-2-9b", "/Users/x/.ollama/models/blobs/sha256-abc"]) {
+    const c = priceFor(m);
+    assert.ok(c, m);
+    assert.equal(c.input, 0);
+    assert.equal(c.output, 0);
+  }
+});
+
+test("priceFor: family fallback + unknown", () => {
+  assert.equal(priceFor("some-sonnet-thing").input, 3);
+  assert.equal(priceFor("grok-9.9").input, 3);
+  assert.equal(priceFor("totally-unknown-model-xyz"), null);
+});
+
+test("costFor: math", () => {
+  const b = { uncachedInputTokens: 1_000_000, outputTokens: 1_000_000, cacheReadTokens: 1_000_000, cacheWriteTokens: 1_000_000 };
+  const c = priceFor("claude-sonnet-4.6"); // 3 / 15 / 0.30 / 3.75
+  assert.ok(Math.abs(costFor(b, c) - (3 + 15 + 0.3 + 3.75)) < 1e-9);
+  const bd = costBreakdown(b, c);
+  assert.ok(Math.abs(bd.inputCost - 3) < 1e-9);
+  assert.ok(Math.abs(bd.outputCost - 15) < 1e-9);
+});
+
+test("costFor: non-Qwen local is $0, Qwen is metered", () => {
+  const b = { uncachedInputTokens: 5_000_000, outputTokens: 2_000_000, cacheReadTokens: 9_000_000, cacheWriteTokens: 0 };
+  assert.equal(costFor(b, priceFor("llama-3-8b")), 0);
+  const q = { uncachedInputTokens: 1_000_000, outputTokens: 1_000_000, cacheReadTokens: 1_000_000, cacheWriteTokens: 0 };
+  assert.ok(Math.abs(costFor(q, priceFor("Qwen3.8-27B-Q6-GGUF")) - (0.25 + 2.5 + 0.05)) < 1e-9);
+});
+
+// ── provider-aware pricing ───────────────────────────────────────────────
+test("modelKey: Copilot keeps model, non-Copilot -> local Qwen", () => {
+  assert.equal(modelKey("github-copilot-official", "claude-sonnet-4.6"), "claude-sonnet-4.6");
+  assert.equal(modelKey("github-copilot", "claude-opus-4.6"), "claude-opus-4.6");
+  assert.equal(modelKey("qweno", "Qwen3.8-27B-Q6-GGUF"), LOCAL_QWEN_KEY);
+  assert.equal(modelKey("omlx", "Qwen3.8-27B-MLX-4bit"), LOCAL_QWEN_KEY);
+  assert.equal(modelKey("vllm", "qwen3.8-27b"), LOCAL_QWEN_KEY);
+  assert.equal(modelKey(null, "claude-sonnet-4.6"), LOCAL_QWEN_KEY); // no provider -> local
+});
+
+test("isCopilotProvider + priceForProvider", () => {
+  assert.equal(isCopilotProvider("github-copilot-official"), true);
+  assert.equal(isCopilotProvider("qweno"), false);
+  assert.equal(priceForProvider("github-copilot-official", "claude-opus-4.6").input, 5);
+  assert.equal(priceForProvider("qweno", "Qwen3.8-27B-Q6-GGUF").input, 0.25);
+  assert.equal(priceForProvider("omlx", "anything").input, 0.25); // non-Copilot -> local Qwen baseline
+});
+
+test("attributeSession: splits totals by step count per model", () => {
+  const totals = { uncachedInputTokens: 1_000_000, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
+  const changes = [
+    { seq: 0, provider: "github-copilot-official", model: "claude-sonnet-4.6" },
+    { seq: 100, provider: "qweno", model: "Qwen3.8-27B-Q6-GGUF" },
+  ];
+  const steps = [];
+  for (let i = 0; i < 10; i++) steps.push(i); // 0..9 -> sonnet
+  for (let i = 100; i < 130; i++) steps.push(i); // 100..129 -> qwen
+  const out = attributeSession(totals, changes, steps, "fallback");
+  const sonnet = out.find((m) => m.model === "claude-sonnet-4.6");
+  const qwen = out.find((m) => m.model === "Qwen3.8-27B-Q6-GGUF");
+  assert.equal(sonnet.steps, 10);
+  assert.equal(qwen.steps, 30);
+  assert.ok(Math.abs(sonnet.buckets.uncachedInputTokens - 250_000) < 1e-6); // 10/40
+  assert.ok(Math.abs(qwen.buckets.uncachedInputTokens - 750_000) < 1e-6); // 30/40
+});
+
+test("attributeSession: no changes -> fallback model gets everything", () => {
+  const totals = { uncachedInputTokens: 100, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
+  const out = attributeSession(totals, [], [1, 2, 3], "Qwen3.8-27B-Q6-GGUF");
+  assert.equal(out.length, 1);
+  assert.equal(out[0].model, "Qwen3.8-27B-Q6-GGUF");
+  assert.equal(out[0].buckets.uncachedInputTokens, 100);
+});
+
+// ── trajectory ───────────────────────────────────────────────────────────
+test("parseTrajectoryText: usage + model attribution", () => {
+  const lines = [
+    { type: "session", id: "s1", createdAt: 1, cwd: "/x", agentPreset: "code" },
+    { type: "request/context", data: { provider: "copilot", model: "claude-sonnet-4.6", contextWindow: 200000 } },
+    { type: "assistant/chunk", data: { turn: 1, step: 1, chunk: { type: "usage", usage: { inputTokens: 100, outputTokens: 50, cacheReadTokens: 200, reasoningTokens: 10 } } } },
+    { type: "assistant/chunk", data: { turn: 1, step: 2, chunk: { type: "usage", usage: { inputTokens: 30, outputTokens: 20, cacheReadTokens: 40 } } } },
+    { type: "assistant/chunk", data: { turn: 1, step: 2, chunk: { type: "finish", replayState: { response: { provider: "copilot", model: "claude-sonnet-4.6" } } } } },
+  ].map((l) => JSON.stringify(l)).join("\n");
+  const r = parseTrajectoryText(lines);
+  assert.equal(r.meta.id, "s1");
+  assert.equal(r.usage.length, 2);
+  assert.equal(r.usage[0].model, "claude-sonnet-4.6");
+  assert.equal(r.usage[0].buckets.uncachedInputTokens, 100);
+  assert.equal(r.usage[0].buckets.reasoningTokens, 10);
+  assert.equal(r.modelCounts["claude-sonnet-4.6"], 2);
+});
+
+test("parseTrajectoryText: header-only -> no usage", () => {
+  const r = parseTrajectoryText(JSON.stringify({ type: "session", id: "s2", cwd: "/y" }));
+  assert.equal(r.usage.length, 0);
+});
+
+test("readTrajectory: content-hash parse cache", () => {
+  const dir = mkdtempSync(join(tmpdir(), "tg-cache-"));
+  const p = join(dir, "session.jsonl.zstd");
+  const compress = (lines) => zstdCompressSync(Buffer.from(lines.map((l) => JSON.stringify(l)).join("\n") + "\n", "utf8"));
+
+  const s0 = parseStatsSnapshot();
+  const delta = () => { const d = parseStatsSnapshot(); return { hits: d.cacheHits - s0.cacheHits, recomputed: d.recomputed - s0.recomputed }; };
+
+  // 1. first read -> recomputed
+  writeFileSync(p, compress([{ type: "session", id: "s1", cwd: "/x" }]));
+  assert.equal(readTrajectory(p).meta.id, "s1");
+  assert.deepEqual(delta(), { hits: 0, recomputed: 1 });
+
+  // 2. unchanged -> cache hit (no recompute, no re-read)
+  assert.equal(readTrajectory(p).meta.id, "s1");
+  assert.deepEqual(delta(), { hits: 1, recomputed: 1 });
+
+  // 3. mtime bumped but content identical -> hash backstop, still a hit
+  const st = statSync(p);
+  utimesSync(p, new Date(st.atimeMs + 5000), new Date(st.mtimeMs + 5000));
+  assert.equal(readTrajectory(p).meta.id, "s1");
+  assert.deepEqual(delta(), { hits: 2, recomputed: 1 });
+
+  // 4. content changed -> recomputed
+  writeFileSync(p, compress([
+    { type: "session", id: "s2", cwd: "/x" },
+    { type: "step/end", seq: 1, data: { turn: 1, step: 1 } },
+  ]));
+  const r4 = readTrajectory(p);
+  assert.equal(r4.meta.id, "s2");
+  assert.equal(r4.stepSeqs.length, 1);
+  assert.deepEqual(delta(), { hits: 2, recomputed: 2 });
+});
+
+test("parseTrajectoryText: event categories + tool names", () => {
+  const lines = [
+    { type: "session", id: "s1", cwd: "/x" },
+    { type: "step/end", seq: 1 },
+    { type: "step/end", seq: 2 },
+    { type: "tool/call", seq: 3, data: { name: "run_code" } },
+    { type: "tool/code-dispatch", seq: 4, data: { name: "bash" } },
+    { type: "tool/code-dispatch", seq: 5, data: { name: "bash" } },
+    { type: "tool/code-dispatch", seq: 6, data: { name: "read" } },
+    { type: "user/message", seq: 7 },
+    { type: "assistant/message", seq: 8 },
+    { type: "turn/end", seq: 9 },
+    { type: "compaction/end", seq: 10 },
+    { type: "llm/retry", seq: 11 },
+    { type: "approval/asked", seq: 12 },
+    { type: "todo/write", seq: 13 },
+    { type: "command/done", seq: 14 },
+    { type: "reasoning-chunks", seq: 15 }, // not an activity category -> ignored
+  ].map((l) => JSON.stringify(l)).join("\n");
+  const r = parseTrajectoryText(lines);
+  assert.equal(r.events.steps, 2);
+  assert.equal(r.events.toolCalls, 1);
+  assert.equal(r.events.toolSubCalls, 3);
+  assert.equal(r.events.userMessages, 1);
+  assert.equal(r.events.assistantMessages, 1);
+  assert.equal(r.events.turns, 1);
+  assert.equal(r.events.compactions, 1);
+  assert.equal(r.events.retries, 1);
+  assert.equal(r.events.approvals, 1);
+  assert.equal(r.events.todos, 1);
+  assert.equal(r.events.commands, 1);
+  assert.equal(r.tools.bash, 2);
+  assert.equal(r.tools.read, 1);
+  assert.equal(r.tools.run_code, undefined); // tool/call names are not counted in tools
+});
+
+test("buildBreakdown: aggregate + per-session events/tools", () => {
+  const home = mkdtempSync(join(tmpdir(), "tg-ev-"));
+  mkdirSync(join(home, "storages"), { recursive: true });
+  const ws = join(home, "sessions", "--tmp--", "session-e");
+  mkdirSync(ws, { recursive: true });
+  writeFileSync(join(home, "storages", "session_projcache.json"), JSON.stringify({ tables: { sessions: {
+    "session-e": { identity: { createdAt: 100, cwd: "/tmp" }, rows: { tokenUsage: { val: { totals: { uncachedInputTokens: 100, outputTokens: 50, cacheReadTokens: 0, cacheWriteTokens: 0 } } } } },
+  }}}));
+  const traj = [
+    { type: "session", id: "session-e", createdAt: 100, cwd: "/tmp" },
+    { type: "step/end", seq: 1 },
+    { type: "tool/call", seq: 2, data: { name: "run_code" } },
+    { type: "tool/code-dispatch", seq: 3, data: { name: "bash" } },
+    { type: "user/message", seq: 4 },
+  ].map((l) => JSON.stringify(l)).join("\n");
+  writeFileSync(join(ws, "session.jsonl.zstd"), zstdCompressSync(Buffer.from(traj, "utf8")));
+  const bd = buildBreakdown({ dshHome: home });
+  assert.equal(bd.events.steps, 1);
+  assert.equal(bd.events.toolCalls, 1);
+  assert.equal(bd.events.toolSubCalls, 1);
+  assert.equal(bd.events.userMessages, 1);
+  assert.equal(bd.tools.length, 1);
+  assert.equal(bd.tools[0].name, "bash");
+  assert.equal(bd.tools[0].count, 1);
+  assert.equal(bd.bySession.length, 1);
+  assert.equal(bd.bySession[0].events.steps, 1);
+  assert.equal(bd.bySession[0].tools[0].name, "bash");
+});
+
+// ── projcache ────────────────────────────────────────────────────────────
+test("readProjcache: aggregates totals", () => {
+  const dir = mkdtempSync(join(tmpdir(), "tg-"));
+  const store = { unit: { name: "session_projcache", version: 3 }, tables: { sessions: {
+    a: { identity: { createdAt: 2, cwd: "/a" }, rows: { tokenUsage: { val: { totals: { uncachedInputTokens: 10, outputTokens: 5, cacheReadTokens: 7, cacheWriteTokens: 1 } } } } },
+    b: { identity: { createdAt: 1, cwd: "/b" }, rows: { tokenUsage: { val: { totals: { uncachedInputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 } } } } },
+  }}};
+  const p = join(dir, "session_projcache.json");
+  writeFileSync(p, JSON.stringify(store));
+  const r = readProjcache(p);
+  assert.equal(r.count, 2);
+  assert.equal(r.nonZero, 1);
+  assert.equal(r.totals.uncachedInputTokens, 10);
+  assert.equal(r.totals.cacheReadTokens, 7);
+});
+
+// ── report (integration, temp DSH home) ──────────────────────────────────
+test("buildReport: merges sources + prices", () => {
+  const home = mkdtempSync(join(tmpdir(), "tg-home-"));
+  mkdirSync(join(home, "storages"), { recursive: true });
+  const ws = join(home, "sessions", "--tmp--", "session-x");
+  mkdirSync(ws, { recursive: true });
+  writeFileSync(join(home, "storages", "session_projcache.json"), JSON.stringify({ tables: { sessions: {
+    "session-x": { identity: { createdAt: 100, cwd: "/tmp" }, rows: { tokenUsage: { val: { totals: { uncachedInputTokens: 1_000_000, outputTokens: 1_000_000, cacheReadTokens: 1_000_000, cacheWriteTokens: 0 } } } } },
+  }}}));
+  const traj = [
+    { type: "session", id: "session-x", createdAt: 100, cwd: "/tmp" },
+    { type: "request/context", data: { provider: "copilot", model: "claude-opus-4.6" } },
+    { type: "assistant/chunk", data: { turn: 1, step: 1, chunk: { type: "usage", usage: { inputTokens: 1_000_000, outputTokens: 1_000_000, cacheReadTokens: 1_000_000 } } } },
+  ].map((l) => JSON.stringify(l)).join("\n");
+  writeFileSync(join(ws, "session.jsonl.zstd"), zstdCompressSync(Buffer.from(traj, "utf8")));
+
+  const rep = buildReport({ dshHome: home });
+  assert.equal(rep.totals.uncachedInputTokens, 1_000_000);
+  assert.equal(rep.totals.allTokens, 3_000_000);
+  const local = rep.comparison.find((c) => c.id === "qwen3.8-local");
+  const opus = rep.comparison.find((c) => c.id === "claude-opus-4.6");
+  assert.ok(Math.abs(local.cost - 2.8) < 1e-6); // Qwen now metered: 0.25+2.5+0.05
+  assert.ok(Math.abs(opus.cost - (5 + 25 + 0.5)) < 1e-6);
+  // savings vs the local (home-lab) baseline
+  assert.equal(local.baseline, true);
+  assert.equal(local.savings, 0);
+  assert.equal(opus.baseline, false);
+  assert.ok(Math.abs(opus.savings - ((5 + 25 + 0.5) - 2.8)) < 1e-6);
+  assert.equal(rep.savings.baselineId, "qwen3.8-local");
+  assert.ok(rep.savings.max > 0);
+  assert.equal(rep.byModel.length, 1);
+  assert.equal(rep.byModel[0].model, "claude-opus-4.6");
+  assert.ok(rep.actual.fromTrajectories);
+  assert.ok(Math.abs(rep.actual.cost - (5 + 25 + 0.5)) < 1e-6);
+});
+
+test("priceTotals: re-prices a window", () => {
+  const totals = { uncachedInputTokens: 1_000_000, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
+  const out = priceTotals(totals, [{ id: "claude-sonnet-4.6", label: "S" }, { id: "qwen3.8-local", label: "L" }]);
+  assert.ok(Math.abs(out[0].cost - 3) < 1e-9);
+  assert.ok(Math.abs(out[1].cost - 0.25) < 1e-9);
+});
+
+test("addSavings: local baseline + per-model savings", () => {
+  const raw = [
+    { id: "qwen3.8-local", label: "L", priced: true, cost: 2.8 },
+    { id: "claude-opus-4.6", label: "O", priced: true, cost: 30.5 },
+    { id: "unknown-model", label: "U", priced: false, cost: null },
+  ];
+  const { comparison, savings } = addSavings(raw);
+  assert.equal(comparison[0].baseline, true);
+  assert.equal(comparison[0].savings, 0);
+  assert.equal(comparison[1].baseline, false);
+  assert.ok(Math.abs(comparison[1].savings - 27.7) < 1e-6);
+  assert.equal(comparison[2].savings, null);
+  assert.equal(savings.baselineId, "qwen3.8-local");
+  assert.ok(Math.abs(savings.baselineCost - 2.8) < 1e-6);
+  assert.ok(Math.abs(savings.max - 27.7) < 1e-6);
+  assert.ok(Math.abs(savings.min - 27.7) < 1e-6);
+});
+
+// ── breakdown ────────────────────────────────────────────────────────────
+test("buildBreakdown: per-day / per-model / per-session (Qwen assumed)", () => {
+  const home = mkdtempSync(join(tmpdir(), "tg-bd-"));
+  mkdirSync(join(home, "storages"), { recursive: true });
+  writeFileSync(join(home, "settings.yaml"), ["agent-default-model:", "  provider: qweno", "  model: Qwen3.8-27B-Q6-GGUF"].join("\n"));
+  writeFileSync(join(home, "storages", "session_projcache.json"), JSON.stringify({ tables: { sessions: {
+    a: { identity: { createdAt: Date.parse("2026-09-01T10:00:00Z"), cwd: "/a" }, rows: { tokenUsage: { val: { totals: { uncachedInputTokens: 1_000_000, outputTokens: 100_000, cacheReadTokens: 5_000_000, cacheWriteTokens: 0 } } } } },
+    b: { identity: { createdAt: Date.parse("2026-09-02T10:00:00Z"), cwd: "/b" }, rows: { tokenUsage: { val: { totals: { uncachedInputTokens: 2_000_000, outputTokens: 200_000, cacheReadTokens: 10_000_000, cacheWriteTokens: 0 } } } } },
+  }}}));
+  const bd = buildBreakdown({ dshHome: home });
+  assert.equal(bd.defaultModel.model, "Qwen3.8-27B-Q6-GGUF");
+  assert.equal(bd.byDay.length, 2);
+  assert.equal(bd.bySession.length, 2);
+  assert.equal(bd.byModel.length, 1);
+  assert.equal(bd.byModel[0].model, "qwen3.8-local"); // non-Copilot -> local Qwen baseline
+  assert.equal(bd.byModel[0].sessions, 2);
+  assert.equal(bd.byModel[0].cacheReadTokens, 15_000_000);
+  assert.ok(Math.abs(bd.byModel[0].cost - 2.25) < 1e-6); // (3M*0.25 + 0.3M*2.5 + 15M*0.05)/1e6
+  // per-session cost (Qwen baseline: 0.25 / 2.5 / 0.05 per M); bySession is newest-first
+  const sA = bd.bySession.find((s) => s.id === "a");
+  const sB = bd.bySession.find((s) => s.id === "b");
+  assert.ok(Math.abs(sA.cost - 0.75) < 1e-6);  // (1M*0.25 + 0.1M*2.5 + 5M*0.05)/1e6
+  assert.ok(Math.abs(sB.cost - 1.5) < 1e-6);   // (2M*0.25 + 0.2M*2.5 + 10M*0.05)/1e6
+  // per-day cost rolls the session costs up (byDay is date-ascending)
+  assert.ok(Math.abs(bd.byDay[0].cost - 0.75) < 1e-6);
+  assert.ok(Math.abs(bd.byDay[1].cost - 1.5) < 1e-6);
+});
+
+test("buildReport: WFH split (local vs Copilot)", () => {
+  const home = mkdtempSync(join(tmpdir(), "tg-wfh-"));
+  mkdirSync(join(home, "storages"), { recursive: true });
+  const mk = (id) => { const ws = join(home, "sessions", "--tmp--", id); mkdirSync(ws, { recursive: true }); return ws; };
+  writeFileSync(join(home, "storages", "session_projcache.json"), JSON.stringify({ tables: { sessions: {
+    "s-local": { identity: { createdAt: 100, cwd: "/a" }, rows: { tokenUsage: { val: { totals: { uncachedInputTokens: 1_000_000, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 } } } } },
+    "s-copilot": { identity: { createdAt: 200, cwd: "/b" }, rows: { tokenUsage: { val: { totals: { uncachedInputTokens: 1_000_000, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 } } } } },
+  }}}));
+  const tLocal = [
+    { type: "session", id: "s-local", cwd: "/a" },
+    { type: "request/context", data: { provider: "qweno", model: "Qwen3.8-27B-Q6-GGUF" } },
+    { type: "assistant/chunk", data: { turn: 1, step: 1, chunk: { type: "usage", usage: { inputTokens: 1_000_000 } } } },
+  ].map((l) => JSON.stringify(l)).join("\n");
+  const tCopilot = [
+    { type: "session", id: "s-copilot", cwd: "/b" },
+    { type: "request/context", data: { provider: "github-copilot-official", model: "claude-sonnet-4.6" } },
+    { type: "assistant/chunk", data: { turn: 1, step: 1, chunk: { type: "usage", usage: { inputTokens: 1_000_000 } } } },
+  ].map((l) => JSON.stringify(l)).join("\n");
+  writeFileSync(join(mk("s-local"), "session.jsonl.zstd"), zstdCompressSync(Buffer.from(tLocal, "utf8")));
+  writeFileSync(join(mk("s-copilot"), "session.jsonl.zstd"), zstdCompressSync(Buffer.from(tCopilot, "utf8")));
+
+  const rep = buildReport({ dshHome: home });
+  // local: 1M input @ 0.25 -> $0.25; copilot: 1M input @ 3 -> $3
+  assert.equal(rep.split.wfh.sessions, 1);
+  assert.equal(rep.split.wfh.tokens, 1_000_000);
+  assert.ok(Math.abs(rep.split.wfh.cost - 0.25) < 1e-6);
+  // WFH reference model defaults to claude-opus-4.6: same local tokens @ 5/M input -> $5
+  assert.equal(rep.split.wfh.referenceModel, "claude-opus-4.6");
+  assert.ok(rep.split.wfh.referenceLabel.includes("Opus 4.6"));
+  assert.ok(Math.abs(rep.split.wfh.corpCost - 5) < 1e-6);
+  assert.ok(Math.abs(rep.split.wfh.saved - 4.75) < 1e-6);
+  assert.equal(rep.split.copilot.sessions, 1);
+  assert.equal(rep.split.copilot.tokens, 1_000_000);
+  assert.ok(Math.abs(rep.split.copilot.cost - 3) < 1e-6);
+  // actual = local + copilot; all-local would have been $0.50
+  assert.ok(Math.abs(rep.actual.cost - 3.25) < 1e-6);
+  assert.ok(Math.abs(rep.actualSavings - 2.75) < 1e-6);
+});
+
+// ── new projcache directory layout (dsh update, 2026-09) ────────────────
+test("readProjcache: new per-session directory layout", () => {
+  const home = mkdtempSync(join(tmpdir(), "tg-dir-"));
+  const sdir = join(home, "storages", "session_projcache", "sessions");
+  mkdirSync(sdir, { recursive: true });
+  const mk = (id, rows, identity) => writeFileSync(join(sdir, id + ".json"), JSON.stringify({ version: 5, record: { identity, rows } }));
+  mk("session-a", {
+    tokenUsage: { val: { totals: { uncachedInputTokens: 100, outputTokens: 50, cacheReadTokens: 200, cacheWriteTokens: 0 } } },
+    sessionStats: { val: { turns: 3, steps: 10, llmMs: 1234, toolMs: 56, ttftMs: 100, ttftSteps: 2, decodeMs: 900, decodeTokens: 50, lastTurn: 3 } },
+    title: { val: "dir layout session" },
+    contextPressure: { val: { surfaceTokens: 1000, contextWindow: 2000, pressureTokens: 0 } },
+    permissions: { val: { preset: "workspace-write", sandbox: "workspace-write", approval: "ask" } },
+    modelSelection: { val: { lastUsed: { provider: "qweno", model: "Qwen3.8-27B-Q6-GGUF" } } },
+    turnOutline: { val: { turns: [{ turn: 1, prompt: "p1", response: "r1" }] } },
+  }, { createdAt: 200, cwd: "/a" });
+  mk("session-b", {
+    tokenUsage: { val: { totals: { uncachedInputTokens: 10, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 } } },
+    title: { val: "b" },
+  }, { createdAt: 100, cwd: "/b" });
+
+  const r = readProjcache(join(home, "storages", "session_projcache"));
+  assert.equal(r.count, 2);
+  assert.equal(r.nonZero, 2);
+  assert.equal(r.totals.uncachedInputTokens, 110);
+  assert.equal(r.totals.cacheReadTokens, 200);
+  const a = r.sessions.find((s) => s.id === "session-a");
+  assert.equal(a.title, "dir layout session");
+  assert.equal(a.turns, 3);
+  assert.equal(a.meta.sandbox, "workspace-write");
+  assert.equal(a.meta.approval, "ask");
+  assert.equal(a.meta.lastUsedModel.model, "Qwen3.8-27B-Q6-GGUF");
+  assert.equal(a.meta.contextPressure.surfaceTokens, 1000);
+  assert.equal(a.meta.turnOutline[0].prompt, "p1");
+  assert.equal(a.meta.goal, null);
+});
+
+test("resolvePaths: prefers new directory store over legacy file", () => {
+  const home = mkdtempSync(join(tmpdir(), "tg-rc-"));
+  mkdirSync(join(home, "storages", "session_projcache", "sessions"), { recursive: true });
+  writeFileSync(join(home, "storages", "session_projcache.json"), "{}");
+  const p = resolvePaths({ dshHome: home });
+  assert.equal(p.storeKind, "dir");
+  assert.ok(p.storePath.endsWith("session_projcache"));
+  // legacy-only home falls back to the file
+  const home2 = mkdtempSync(join(tmpdir(), "tg-rc2-"));
+  mkdirSync(join(home2, "storages"), { recursive: true });
+  writeFileSync(join(home2, "storages", "session_projcache.json"), "{}");
+  const p2 = resolvePaths({ dshHome: home2 });
+  assert.equal(p2.storeKind, "file");
+  assert.ok(p2.storePath.endsWith("session_projcache.json"));
+});
+
+test("buildBreakdown: directory store + per-session meta + toolCalls", () => {
+  const home = mkdtempSync(join(tmpdir(), "tg-bddir-"));
+  const sdir = join(home, "storages", "session_projcache", "sessions");
+  mkdirSync(sdir, { recursive: true });
+  writeFileSync(join(sdir, "session-d.json"), JSON.stringify({ version: 5, record: {
+    identity: { createdAt: Date.parse("2026-09-04T10:00:00Z"), cwd: "/d" },
+    rows: {
+      tokenUsage: { val: { totals: { uncachedInputTokens: 1_000_000, outputTokens: 100_000, cacheReadTokens: 0, cacheWriteTokens: 0 } } },
+      title: { val: "dir session" },
+      sessionStats: { val: { turns: 1, steps: 2, llmMs: 500, toolMs: 50 } },
+      contextPressure: { val: { surfaceTokens: 500, contextWindow: 1000, pressureTokens: 0 } },
+    },
+  }}));
+  const ws = join(home, "sessions", "--tmp--", "session-d");
+  mkdirSync(ws, { recursive: true });
+  const traj = [
+    { type: "session", id: "session-d", createdAt: Date.parse("2026-09-04T10:00:00Z"), cwd: "/d" },
+    { type: "request/context", data: { provider: "qweno", model: "Qwen3.8-27B-Q6-GGUF" } },
+    { type: "step/end", seq: 1 },
+    { type: "tool/call", seq: 2, data: { name: "bash" } },
+    { type: "tool/code-dispatch", seq: 3, data: { name: "bash" } },
+    { type: "tool/call", seq: 4, data: { name: "read" } },
+  ].map((l) => JSON.stringify(l)).join("\n");
+  writeFileSync(join(ws, "session.jsonl.zstd"), zstdCompressSync(Buffer.from(traj, "utf8")));
+
+  const bd = buildBreakdown({ dshHome: home });
+  assert.equal(bd.bySession.length, 1);
+  const s = bd.bySession[0];
+  assert.equal(s.id, "session-d");
+  assert.equal(s.meta.contextPressure.surfaceTokens, 500);
+  assert.equal(s.meta.toolMs, 50);
+  assert.deepEqual(s.toolCalls, [{ name: "bash", count: 1 }, { name: "read", count: 1 }]);
+  assert.deepEqual(s.tools, [{ name: "bash", count: 1 }]);
+});
+
+// ── editable pricing table (file-backed, re-read per request) ───────────
+test("loadPricing: no file -> built-in table + default reference (opus 4.6)", () => {
+  const home = mkdtempSync(join(tmpdir(), "tg-px-"));
+  const p = loadPricing(home);
+  assert.equal(p.fromFile, false);
+  assert.equal(p.referenceModel, "claude-opus-4.6");
+  assert.ok(p.models.length >= 10);
+  assert.ok(p.models.some((m) => m.id === "qwen3.8-local" && m.local));
+  assert.ok(p.models.every((m) => m.id && m.label && Number.isFinite(m.input)));
+  // built-in rates are effective
+  assert.equal(priceFor("claude-sonnet-4.6").input, 3);
+});
+
+test("savePricing: round-trip + reference model drives WFH corpCost", () => {
+  const home = mkdtempSync(join(tmpdir(), "tg-px2-"));
+  mkdirSync(join(home, "storages"), { recursive: true });
+  const ws = join(home, "sessions", "--tmp--", "s-local");
+  mkdirSync(ws, { recursive: true });
+  writeFileSync(join(home, "storages", "session_projcache.json"), JSON.stringify({ tables: { sessions: {
+    "s-local": { identity: { createdAt: 100, cwd: "/a" }, rows: { tokenUsage: { val: { totals: { uncachedInputTokens: 1_000_000, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 } } } } },
+  }}}));
+  const tLocal = [
+    { type: "session", id: "s-local", cwd: "/a" },
+    { type: "request/context", data: { provider: "qweno", model: "Qwen3.8-27B-Q6-GGUF" } },
+    { type: "assistant/chunk", data: { turn: 1, step: 1, chunk: { type: "usage", usage: { inputTokens: 1_000_000 } } } },
+  ].map((l) => JSON.stringify(l)).join("\n");
+  writeFileSync(join(ws, "session.jsonl.zstd"), zstdCompressSync(Buffer.from(tLocal, "utf8")));
+
+  // default reference: opus 4.6 -> 1M input @ 5 -> $5
+  let rep = buildReport({ dshHome: home });
+  assert.equal(rep.split.wfh.referenceModel, "claude-opus-4.6");
+  assert.ok(Math.abs(rep.split.wfh.corpCost - 5) < 1e-6);
+
+  // user switches the reference to haiku 4.5 and tweaks a rate
+  const models = builtinEntries().map((m) => (m.id === "claude-sonnet-4.6" ? { ...m, input: 9.99 } : m));
+  const saved = savePricing(home, { referenceModel: "claude-haiku-4.5", models });
+  assert.equal(saved.referenceModel, "claude-haiku-4.5");
+  assert.ok(existsSync(pricingFilePath(home)));
+
+  // file is re-read on the next request: reference = haiku (1/M input -> $1), override effective
+  rep = buildReport({ dshHome: home });
+  assert.equal(rep.split.wfh.referenceModel, "claude-haiku-4.5");
+  assert.ok(Math.abs(rep.split.wfh.corpCost - 1) < 1e-6);
+  assert.equal(priceFor("claude-sonnet-4.6").input, 9.99);
+  const p2 = loadPricing(home);
+  assert.equal(p2.fromFile, true);
+
+  // removing an entry makes that model unpriced
+  const withoutOpus = saved.models.filter((m) => m.id !== "claude-opus-4.6");
+  savePricing(home, { referenceModel: "claude-haiku-4.5", models: withoutOpus });
+  assert.equal(priceFor("claude-opus-4.6"), null);
+
+  // a fresh home without the file restores the built-in table
+  const home2 = mkdtempSync(join(tmpdir(), "tg-px3-"));
+  loadPricing(home2);
+  assert.equal(priceFor("claude-opus-4.6").input, 5);
+  assert.equal(priceFor("claude-sonnet-4.6").input, 3);
+});
+
+test("savePricing: validation", () => {
+  const home = mkdtempSync(join(tmpdir(), "tg-px4-"));
+  assert.throws(() => savePricing(home, { referenceModel: "claude-opus-4.6", models: [] }), /non-empty/);
+  assert.throws(() => savePricing(home, { referenceModel: "not-in-table", models: builtinEntries() }), /referenceModel/);
+  assert.throws(() => savePricing(home, { referenceModel: "claude-opus-4.6", models: [{ id: "x", input: -1, output: 1, cacheRead: 0, cacheWrite: 0 }] }), /numbers >= 0/);
+  assert.throws(() => savePricing(home, { referenceModel: "claude-opus-4.6", models: [{ id: "x", input: "abc", output: 1, cacheRead: 0, cacheWrite: 0 }] }), /numbers >= 0/);
+  // duplicates collapse, ids are lowercased, label defaults to id
+  const out = savePricing(home, {
+    referenceModel: "My-Model",
+    models: [
+      { id: "My-Model", input: 1, output: 2, cacheRead: 0.1, cacheWrite: 1.25 },
+      { id: "my-model", input: 9, output: 9, cacheRead: 9, cacheWrite: 9 },
+      { id: "", input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+      { id: "other", input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    ],
+  });
+  assert.equal(out.models.length, 2);
+  assert.equal(out.models[0].id, "my-model");
+  assert.equal(out.models[0].label, "my-model");
+  assert.equal(out.referenceModel, "my-model");
+});
+
+// keep the built-in table effective after the file-backed tests mutate it
+test("pricing: built-in table restored for later runs", () => {
+  setRuntimeTable(builtinEntries(), "claude-opus-4.6");
+  assert.equal(priceFor("claude-sonnet-4.6").input, 3);
+  assert.equal(priceFor("claude-opus-4.6").input, 5);
+});
+
+// ── decode speed (tokens/s from trajectory chunk timestamps) ────────────
+test("parseTrajectoryText: decode timing from chunk timestamps", () => {
+  const lines = [
+    { type: "session", id: "s1", cwd: "/x" },
+    { type: "request/context", data: { provider: "copilot", model: "claude-sonnet-4.6" } },
+    { type: "assistant/chunk", time: 1000, data: { turn: 1, step: 1, chunk: { type: "block-start", index: 0, blockType: "text" } } },
+    { type: "assistant/chunk", time: 3000, data: { turn: 1, step: 1, chunk: { type: "usage", usage: { inputTokens: 100, outputTokens: 200, cacheReadTokens: 0 } } } },
+    { type: "assistant/chunk", time: 4000, data: { turn: 1, step: 2, chunk: { type: "block-start", index: 0, blockType: "text" } } },
+    { type: "assistant/chunk", time: 4500, data: { turn: 1, step: 2, chunk: { type: "usage", usage: { inputTokens: 50, outputTokens: 100, cacheReadTokens: 0 } } } },
+  ].map((l) => JSON.stringify(l)).join("\n");
+  const r = parseTrajectoryText(lines);
+  assert.equal(r.usage.length, 2);
+  assert.equal(r.usage[0].decodeMs, 2000); // usage.time - firstChunk.time (TTFT excluded)
+  assert.equal(r.usage[1].decodeMs, 500);
+  assert.deepEqual(r.decode, { tokens: 300, ms: 2500, steps: 2 });
+});
+
+test("parseTrajectoryText: no timestamps -> no decode stats (back-compat)", () => {
+  const lines = [
+    { type: "session", id: "s1", cwd: "/x" },
+    { type: "request/context", data: { provider: "copilot", model: "claude-sonnet-4.6" } },
+    { type: "assistant/chunk", data: { turn: 1, step: 1, chunk: { type: "usage", usage: { inputTokens: 100, outputTokens: 200 } } } },
+  ].map((l) => JSON.stringify(l)).join("\n");
+  const r = parseTrajectoryText(lines);
+  assert.equal(r.usage[0].decodeMs, null);
+  assert.deepEqual(r.decode, { tokens: 0, ms: 0, steps: 0 });
+});
+
+test("buildReport: decode speed per model + global + per session", () => {
+  const home = mkdtempSync(join(tmpdir(), "tg-dec-"));
+  mkdirSync(join(home, "storages"), { recursive: true });
+  const ws = join(home, "sessions", "--tmp--", "s-d");
+  mkdirSync(ws, { recursive: true });
+  writeFileSync(join(home, "storages", "session_projcache.json"), JSON.stringify({ tables: { sessions: {
+    "s-d": { identity: { createdAt: 100, cwd: "/x" }, rows: { tokenUsage: { val: { totals: { uncachedInputTokens: 1500, outputTokens: 250, cacheReadTokens: 0, cacheWriteTokens: 0 } } } } },
+  }}}));
+  const traj = [
+    { type: "session", id: "s-d", cwd: "/x" },
+    { type: "request/context", data: { provider: "github-copilot-official", model: "claude-sonnet-4.6" } },
+    { type: "assistant/chunk", time: 1000, data: { turn: 1, step: 1, chunk: { type: "block-start", index: 0, blockType: "text" } } },
+    { type: "assistant/chunk", time: 3000, data: { turn: 1, step: 1, chunk: { type: "usage", usage: { inputTokens: 1000, outputTokens: 200, cacheReadTokens: 0 } } } },
+    { type: "request/context", data: { provider: "qweno", model: "Qwen3.8-27B-Q6-GGUF" } },
+    { type: "assistant/chunk", time: 3000, data: { turn: 1, step: 2, chunk: { type: "block-start", index: 0, blockType: "text" } } },
+    { type: "assistant/chunk", time: 4000, data: { turn: 1, step: 2, chunk: { type: "usage", usage: { inputTokens: 500, outputTokens: 50, cacheReadTokens: 0 } } } },
+  ].map((l) => JSON.stringify(l)).join("\n");
+  writeFileSync(join(ws, "session.jsonl.zstd"), zstdCompressSync(Buffer.from(traj, "utf8")));
+
+  const rep = buildReport({ dshHome: home });
+  const sonnet = rep.byModel.find((m) => m.model === "claude-sonnet-4.6");
+  const qwen = rep.byModel.find((m) => m.model === "qwen3.8-local");
+  assert.equal(sonnet.tokPerSec, 100); // 200 tokens / 2000ms
+  assert.equal(qwen.tokPerSec, 50);    // 50 tokens / 1000ms
+  assert.equal(rep.decode.tokens, 250);
+  assert.equal(rep.decode.ms, 3000);
+  assert.equal(rep.decode.steps, 2); // one timed usage record per model
+  assert.ok(Math.abs(rep.decode.tokPerSec - 83.3) < 0.05); // 250 / 3s
+
+  const bd = buildBreakdown({ dshHome: home });
+  assert.equal(bd.bySession.length, 1);
+  assert.ok(Math.abs(bd.bySession[0].tokPerSec - 83.3) < 0.05);
+});
+
+// ── prompt processing speed (TTFT + prefill) ────────────────────────────
+test("parseTrajectoryText: TTFT + prefill from step/start timestamps (primary)", () => {
+  const lines = [
+    { type: "session", id: "s1", cwd: "/x" },
+    { type: "step/start", seq: 1, time: 1000, data: { turn: 1, step: 1 } },
+    { type: "assistant/chunk", time: 3000, data: { turn: 1, step: 1, chunk: { type: "block-start", index: 0, blockType: "text" } } },
+    { type: "assistant/chunk", time: 5000, data: { turn: 1, step: 1, chunk: { type: "usage", usage: { inputTokens: 1000, outputTokens: 200, cacheReadTokens: 5000 } } } },
+    { type: "step/end", seq: 2, time: 5100, data: { turn: 1, step: 1 } },
+    { type: "step/start", seq: 3, time: 5200, data: { turn: 1, step: 2 } },
+    { type: "assistant/chunk", time: 5700, data: { turn: 1, step: 2, chunk: { type: "block-start", index: 0, blockType: "text" } } },
+    { type: "assistant/chunk", time: 6200, data: { turn: 1, step: 2, chunk: { type: "usage", usage: { inputTokens: 100, outputTokens: 100, cacheReadTokens: 6000 } } } },
+  ].map((l) => JSON.stringify(l)).join("\n");
+  const r = parseTrajectoryText(lines);
+  assert.equal(r.usage.length, 2);
+  assert.equal(r.usage[0].ttftMs, 2000); // first chunk 3000 - step start 1000
+  assert.equal(r.usage[0].decodeMs, 2000); // usage 5000 - first chunk 3000
+  assert.equal(r.usage[1].ttftMs, 500); // first chunk 5700 - step start 5200
+  assert.equal(r.usage[1].decodeMs, 500);
+  // prefill counts NEW (uncached) input tokens over TTFT — cached reads excluded
+  assert.deepEqual(r.prefill, { tokens: 1100, ms: 2500, steps: 2 });
+  assert.deepEqual(r.decode, { tokens: 300, ms: 2500, steps: 2 });
+});
+
+test("parseTrajectoryText: TTFT falls back to request events without step/start", () => {
+  const lines = [
+    { type: "session", id: "s1", cwd: "/x" },
+    { type: "request/context", time: 1000, data: { provider: "copilot", model: "claude-sonnet-4.6" } },
+    { type: "assistant/chunk", time: 3000, data: { turn: 1, step: 1, chunk: { type: "usage", usage: { inputTokens: 1000, outputTokens: 200 } } } },
+  ].map((l) => JSON.stringify(l)).join("\n");
+  const r = parseTrajectoryText(lines);
+  assert.equal(r.usage[0].ttftMs, 2000); // first chunk 3000 - request 1000
+  assert.deepEqual(r.prefill, { tokens: 1000, ms: 2000, steps: 1 });
+});
+
+test("parseTrajectoryText: no timing at all -> no TTFT (back-compat)", () => {
+  const lines = [
+    { type: "session", id: "s1", cwd: "/x" },
+    { type: "request/context", data: { provider: "copilot", model: "claude-sonnet-4.6" } }, // no time
+    { type: "assistant/chunk", time: 1000, data: { turn: 1, step: 1, chunk: { type: "usage", usage: { inputTokens: 100, outputTokens: 50 } } } },
+  ].map((l) => JSON.stringify(l)).join("\n");
+  const r = parseTrajectoryText(lines);
+  assert.equal(r.usage[0].ttftMs, null);
+  assert.deepEqual(r.prefill, { tokens: 0, ms: 0, steps: 0 });
+});
+
+test("buildPerformance: per model + per session x model (model switch)", () => {
+  const home = mkdtempSync(join(tmpdir(), "tg-perf-"));
+  mkdirSync(join(home, "storages"), { recursive: true });
+  const ws = join(home, "sessions", "--tmp--", "s-p");
+  mkdirSync(ws, { recursive: true });
+  writeFileSync(join(home, "storages", "session_projcache.json"), JSON.stringify({ tables: { sessions: {
+    "s-p": { identity: { createdAt: 100, cwd: "/x" }, rows: { tokenUsage: { val: { totals: { uncachedInputTokens: 1500, outputTokens: 250, cacheReadTokens: 0, cacheWriteTokens: 0 } } } } },
+  }}}));
+  const traj = [
+    { type: "session", id: "s-p", cwd: "/x" },
+    { type: "request/header", seq: 0, data: { header: { config: { provider: "github-copilot-official", model: "claude-sonnet-4.6" } } } },
+    { type: "step/start", seq: 1, time: 1000, data: { turn: 1, step: 1 } },
+    { type: "assistant/chunk", time: 3000, data: { turn: 1, step: 1, chunk: { type: "block-start", index: 0, blockType: "text" } } },
+    { type: "assistant/chunk", time: 5000, data: { turn: 1, step: 1, chunk: { type: "usage", usage: { inputTokens: 1000, outputTokens: 200, cacheReadTokens: 0 } } } },
+    { type: "request/context", data: { provider: "qweno", model: "Qwen3.8-27B-Q6-GGUF" } },
+    { type: "step/start", seq: 2, time: 6000, data: { turn: 1, step: 2 } },
+    { type: "assistant/chunk", time: 6500, data: { turn: 1, step: 2, chunk: { type: "block-start", index: 0, blockType: "text" } } },
+    { type: "assistant/chunk", time: 7000, data: { turn: 1, step: 2, chunk: { type: "usage", usage: { inputTokens: 500, outputTokens: 50, cacheReadTokens: 0 } } } },
+  ].map((l) => JSON.stringify(l)).join("\n");
+  writeFileSync(join(ws, "session.jsonl.zstd"), zstdCompressSync(Buffer.from(traj, "utf8")));
+
+  const perf = buildPerformance({ dshHome: home });
+  // global totals: 250 streamed / 2.5s; 1500 new ctx / 2.5s
+  assert.equal(perf.totals.decode.tokPerSec, 100);
+  assert.equal(perf.totals.prefill.tokens, 1500);
+  assert.equal(perf.totals.prefill.tokPerSec, 600);
+  assert.equal(perf.totals.prefill.avgTtftMs, 1250); // (2000+500)/2
+  // per model
+  const sonnet = perf.byModel.find((m) => m.model === "claude-sonnet-4.6");
+  const qwen = perf.byModel.find((m) => m.model === "qwen3.8-local");
+  assert.ok(sonnet && qwen);
+  assert.equal(sonnet.tokPerSec, 100); // 200 / 2s
+  assert.equal(sonnet.promptTokPerSec, 500); // 1000 / 2s
+  assert.equal(sonnet.avgTtftMs, 2000);
+  assert.equal(sonnet.avgContext, 1000);
+  assert.equal(qwen.tokPerSec, 100); // 50 / 0.5s
+  assert.equal(qwen.promptTokPerSec, 1000); // 500 / 0.5s
+  assert.equal(qwen.avgTtftMs, 500);
+  // per session x model: the mid-session model switch shows two rows
+  assert.equal(perf.sessions.length, 1);
+  const s = perf.sessions[0];
+  assert.equal(s.modelCount, 2);
+  assert.equal(s.models.length, 2);
+  const sSonnet = s.models.find((m) => m.model === "claude-sonnet-4.6");
+  const sQwen = s.models.find((m) => m.model === "qwen3.8-local");
+  assert.equal(sSonnet.tokPerSec, 100);
+  assert.equal(sSonnet.promptTokPerSec, 500);
+  assert.equal(sQwen.tokPerSec, 100);
+  assert.equal(sQwen.promptTokPerSec, 1000);
+});
+
+test("buildReport: prefill aggregate + byModel prompt fields", () => {
+  const home = mkdtempSync(join(tmpdir(), "tg-pref-"));
+  mkdirSync(join(home, "storages"), { recursive: true });
+  const ws = join(home, "sessions", "--tmp--", "s-q");
+  mkdirSync(ws, { recursive: true });
+  writeFileSync(join(home, "storages", "session_projcache.json"), JSON.stringify({ tables: { sessions: {
+    "s-q": { identity: { createdAt: 100, cwd: "/x" }, rows: { tokenUsage: { val: { totals: { uncachedInputTokens: 1000, outputTokens: 200, cacheReadTokens: 0, cacheWriteTokens: 0 } } } } },
+  }}}));
+  const traj = [
+    { type: "session", id: "s-q", cwd: "/x" },
+    { type: "request/context", data: { provider: "github-copilot-official", model: "claude-sonnet-4.6" } },
+    { type: "step/start", seq: 1, time: 1000, data: { turn: 1, step: 1 } },
+    { type: "assistant/chunk", time: 3000, data: { turn: 1, step: 1, chunk: { type: "block-start", index: 0, blockType: "text" } } },
+    { type: "assistant/chunk", time: 5000, data: { turn: 1, step: 1, chunk: { type: "usage", usage: { inputTokens: 1000, outputTokens: 200, cacheReadTokens: 0 } } } },
+  ].map((l) => JSON.stringify(l)).join("\n");
+  writeFileSync(join(ws, "session.jsonl.zstd"), zstdCompressSync(Buffer.from(traj, "utf8")));
+
+  const rep = buildReport({ dshHome: home });
+  assert.equal(rep.prefill.tokens, 1000);
+  assert.equal(rep.prefill.ms, 2000);
+  assert.equal(rep.prefill.steps, 1);
+  assert.equal(rep.prefill.tokPerSec, 500);
+  assert.equal(rep.prefill.avgTtftMs, 2000);
+  const m = rep.byModel[0];
+  assert.equal(m.promptTokPerSec, 500);
+  assert.equal(m.avgTtftMs, 2000);
+  assert.equal(m.avgContext, 1000);
+});

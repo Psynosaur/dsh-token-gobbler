@@ -1,0 +1,7 @@
+# token-gobbler bundle patch: token-usage dashboard for the web profile.
+# One host row; the row name resolves from the profile's own node_modules
+# (installed as a link: dependency). The client (settings.section dashboard)
+# is attached via package.json "dsh.client".
+- insert:
+    - id: token-gobbler
+      name: 'token-gobbler'

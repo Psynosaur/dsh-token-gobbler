@@ -1,0 +1,50 @@
+{
+  "name": "token-gobbler",
+  "version": "0.1.0",
+  "private": true,
+  "description": "DSH plugin that gobbles your token usage straight out of session trajectories + projections, then prices it against Copilot's Claude/Grok (and your free local models). Watch the corp tokens get chomped.",
+  "license": "MIT",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./pricing": "./lib/pricing.js",
+    "./report": "./lib/report.js",
+    "./trajectory": "./lib/trajectory.js",
+    "./projcache": "./lib/projcache.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "bin": {
+    "token-gobbler": "bin/token-gobbler.js"
+  },
+  "files": [
+    "LICENSE",
+    "README.md",
+    "cordis.patch.yml",
+    "lib/**",
+    "bin/**"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-ui-primitives",
+        "@deepseek-ai/dsh-client-ui-settings"
+      ],
+      "platform": "web"
+    }
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "usage": "node bin/token-gobbler.js",
+    "usage:json": "node bin/token-gobbler.js --json"
+  }
+}
