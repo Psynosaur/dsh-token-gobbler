@@ -6,11 +6,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { zstdCompressSync } from "node:zlib";
 
-import { priceFor, costFor, costBreakdown, modelKey, priceForProvider, isCopilotProvider, LOCAL_QWEN_KEY } from "../lib/pricing.js";
+import { priceFor, costFor, costBreakdown, modelKey, priceForProvider, isCopilotProvider, LOCAL_QWEN_KEY, seedEntries, kindFor } from "../lib/pricing.js";
 import { attributeSession } from "../lib/report.js";
 import { parseTrajectoryText, readTrajectory, parseStatsSnapshot } from "../lib/trajectory.js";
 import { readProjcache } from "../lib/projcache.js";
-import { buildReport, priceTotals, buildBreakdown, buildPerformance, addSavings, resolvePaths, loadPricing, savePricing, pricingFilePath } from "../lib/report.js";
+import { buildReport, priceTotals, buildBreakdown, buildPerformance, addSavings, resolvePaths, loadPricing, savePricing, pricingFilePath, reprocessTrajectories, discoverLocalModels } from "../lib/report.js";
 import { builtinEntries, setRuntimeTable } from "../lib/pricing.js";
 
 // ── pricing ──────────────────────────────────────────────────────────────
@@ -55,29 +55,37 @@ test("costFor: math", () => {
   assert.ok(Math.abs(bd.outputCost - 15) < 1e-9);
 });
 
-test("costFor: non-Qwen local is $0, Qwen is metered", () => {
+test("costFor: local models price at their configured rates, corp models bill", () => {
   const b = { uncachedInputTokens: 5_000_000, outputTokens: 2_000_000, cacheReadTokens: 9_000_000, cacheWriteTokens: 0 };
-  assert.equal(costFor(b, priceFor("llama-3-8b")), 0);
+  assert.equal(costFor(b, priceFor("llama-3-8b")), 0); // non-Qwen local -> local-free card (all-zero rates)
   const q = { uncachedInputTokens: 1_000_000, outputTokens: 1_000_000, cacheReadTokens: 1_000_000, cacheWriteTokens: 0 };
-  assert.ok(Math.abs(costFor(q, priceFor("Qwen3.8-27B-Q6-GGUF")) - (0.25 + 2.5 + 0.05)) < 1e-9);
+  // local Qwen -> qwen3.8-local card (0.25 / 2.5 / 0.05 / 0.3125)
+  assert.ok(Math.abs(costFor(q, priceFor("Qwen3.8-27B-Q6-GGUF")) - (0.25 + 2.5 + 0.05)) < 1e-6);
+  assert.ok(Math.abs(costFor(q, priceFor("qwen3.8-local")) - (0.25 + 2.5 + 0.05)) < 1e-6);
+  // a corp card still bills at its rate
+  assert.ok(Math.abs(costFor(q, priceFor("deepseek-v4-flash")) - (0.44 + 1.32 + 0.014)) < 1e-6);
 });
 
 // ── provider-aware pricing ───────────────────────────────────────────────
-test("modelKey: Copilot keeps model, non-Copilot -> local Qwen", () => {
+test("modelKey: the table decides (copilot keeps its card; local keeps its own name)", () => {
   assert.equal(modelKey("github-copilot-official", "claude-sonnet-4.6"), "claude-sonnet-4.6");
   assert.equal(modelKey("github-copilot", "claude-opus-4.6"), "claude-opus-4.6");
-  assert.equal(modelKey("qweno", "Qwen3.8-27B-Q6-GGUF"), LOCAL_QWEN_KEY);
-  assert.equal(modelKey("omlx", "Qwen3.8-27B-MLX-4bit"), LOCAL_QWEN_KEY);
-  assert.equal(modelKey("vllm", "qwen3.8-27b"), LOCAL_QWEN_KEY);
-  assert.equal(modelKey(null, "claude-sonnet-4.6"), LOCAL_QWEN_KEY); // no provider -> local
+  // local providers are NOT collapsed into the qwen baseline — each keeps its own model name
+  assert.equal(modelKey("qweno", "Qwen3.8-27B-Q6-GGUF"), "qwen3.8-27b-q6-gguf");
+  assert.equal(modelKey("omlx", "Qwen3.8-27B-MLX-4bit"), "qwen3.8-27b-mlx-4bit");
+  assert.equal(modelKey("vllm", "qwen3.8-27b"), "qwen3.8-27b");
+  assert.equal(modelKey("deepseek-official", "deepseek-v4-flash"), "deepseek-v4-flash"); // corp card keeps its own card
+  assert.equal(modelKey(null, "claude-sonnet-4.6"), "claude-sonnet-4.6"); // corp-marked card stays corp even with no provider
 });
 
 test("isCopilotProvider + priceForProvider", () => {
   assert.equal(isCopilotProvider("github-copilot-official"), true);
   assert.equal(isCopilotProvider("qweno"), false);
   assert.equal(priceForProvider("github-copilot-official", "claude-opus-4.6").input, 5);
-  assert.equal(priceForProvider("qweno", "Qwen3.8-27B-Q6-GGUF").input, 0.25);
-  assert.equal(priceForProvider("omlx", "anything").input, 0.25); // non-Copilot -> local Qwen baseline
+  assert.equal(priceForProvider("qweno", "Qwen3.8-27B-Q6-GGUF").input, 0.25); // local Qwen -> metered qwen card
+  assert.equal(priceForProvider("omlx", "Qwen3.8-27B-MLX-4bit").input, 0.25); // local Qwen -> metered qwen card
+  assert.equal(priceForProvider("ollama", "llama-3-8b").input, 0); // other self-hosted -> local-free
+  assert.equal(priceForProvider("omlx", "totally-unknown"), null); // unrecognizable local -> no card
 });
 
 test("attributeSession: splits totals by step count per model", () => {
@@ -265,14 +273,15 @@ test("buildReport: merges sources + prices", () => {
   assert.equal(rep.totals.allTokens, 3_000_000);
   const local = rep.comparison.find((c) => c.id === "qwen3.8-local");
   const opus = rep.comparison.find((c) => c.id === "claude-opus-4.6");
-  assert.ok(Math.abs(local.cost - 2.8) < 1e-6); // Qwen now metered: 0.25+2.5+0.05
+  assert.ok(Math.abs(local.cost - (0.25 + 2.5 + 0.05)) < 1e-6); // local Qwen priced at qwen3.8-local rates
   assert.ok(Math.abs(opus.cost - (5 + 25 + 0.5)) < 1e-6);
   // savings vs the local (home-lab) baseline
   assert.equal(local.baseline, true);
   assert.equal(local.savings, 0);
   assert.equal(opus.baseline, false);
-  assert.ok(Math.abs(opus.savings - ((5 + 25 + 0.5) - 2.8)) < 1e-6);
+  assert.ok(Math.abs(opus.savings - ((5 + 25 + 0.5) - (0.25 + 2.5 + 0.05))) < 1e-6);
   assert.equal(rep.savings.baselineId, "qwen3.8-local");
+  assert.ok(Math.abs(rep.savings.baselineCost - (0.25 + 2.5 + 0.05)) < 1e-6);
   assert.ok(rep.savings.max > 0);
   assert.equal(rep.byModel.length, 1);
   assert.equal(rep.byModel[0].model, "claude-opus-4.6");
@@ -284,7 +293,7 @@ test("priceTotals: re-prices a window", () => {
   const totals = { uncachedInputTokens: 1_000_000, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
   const out = priceTotals(totals, [{ id: "claude-sonnet-4.6", label: "S" }, { id: "qwen3.8-local", label: "L" }]);
   assert.ok(Math.abs(out[0].cost - 3) < 1e-9);
-  assert.ok(Math.abs(out[1].cost - 0.25) < 1e-9);
+  assert.ok(Math.abs(out[1].cost - 0.25) < 1e-9); // home-lab baseline priced at qwen3.8-local input rate
 });
 
 test("addSavings: local baseline + per-model savings", () => {
@@ -319,15 +328,15 @@ test("buildBreakdown: per-day / per-model / per-session (Qwen assumed)", () => {
   assert.equal(bd.byDay.length, 2);
   assert.equal(bd.bySession.length, 2);
   assert.equal(bd.byModel.length, 1);
-  assert.equal(bd.byModel[0].model, "qwen3.8-local"); // non-Copilot -> local Qwen baseline
+  assert.equal(bd.byModel[0].model, "qwen3.8-27b-q6-gguf"); // the default model keeps its own name (not folded into the qwen baseline)
   assert.equal(bd.byModel[0].sessions, 2);
   assert.equal(bd.byModel[0].cacheReadTokens, 15_000_000);
-  assert.ok(Math.abs(bd.byModel[0].cost - 2.25) < 1e-6); // (3M*0.25 + 0.3M*2.5 + 15M*0.05)/1e6
-  // per-session cost (Qwen baseline: 0.25 / 2.5 / 0.05 per M); bySession is newest-first
+  // local Qwen priced at qwen3.8-local rates: a=(1M*.25+100K*2.5+5M*.05)=0.75, b=(2M*.25+200K*2.5+10M*.05)=1.5
+  assert.ok(Math.abs(bd.byModel[0].cost - 2.25) < 1e-6);
   const sA = bd.bySession.find((s) => s.id === "a");
   const sB = bd.bySession.find((s) => s.id === "b");
-  assert.ok(Math.abs(sA.cost - 0.75) < 1e-6);  // (1M*0.25 + 0.1M*2.5 + 5M*0.05)/1e6
-  assert.ok(Math.abs(sB.cost - 1.5) < 1e-6);   // (2M*0.25 + 0.2M*2.5 + 10M*0.05)/1e6
+  assert.ok(Math.abs(sA.cost - 0.75) < 1e-6);
+  assert.ok(Math.abs(sB.cost - 1.5) < 1e-6);
   // per-day cost rolls the session costs up (byDay is date-ascending)
   assert.ok(Math.abs(bd.byDay[0].cost - 0.75) < 1e-6);
   assert.ok(Math.abs(bd.byDay[1].cost - 1.5) < 1e-6);
@@ -355,21 +364,21 @@ test("buildReport: WFH split (local vs Copilot)", () => {
   writeFileSync(join(mk("s-copilot"), "session.jsonl.zstd"), zstdCompressSync(Buffer.from(tCopilot, "utf8")));
 
   const rep = buildReport({ dshHome: home });
-  // local: 1M input @ 0.25 -> $0.25; copilot: 1M input @ 3 -> $3
+  // local: seeded entry has zero rates (user hasn't set them yet) -> $0; copilot: 1M @ 3/M -> $3
   assert.equal(rep.split.wfh.sessions, 1);
   assert.equal(rep.split.wfh.tokens, 1_000_000);
-  assert.ok(Math.abs(rep.split.wfh.cost - 0.25) < 1e-6);
+  assert.equal(rep.split.wfh.cost, 0); // local model's own table entry has 0 rates until user sets them
   // WFH reference model defaults to claude-opus-4.6: same local tokens @ 5/M input -> $5
   assert.equal(rep.split.wfh.referenceModel, "claude-opus-4.6");
   assert.ok(rep.split.wfh.referenceLabel.includes("Opus 4.6"));
   assert.ok(Math.abs(rep.split.wfh.corpCost - 5) < 1e-6);
-  assert.ok(Math.abs(rep.split.wfh.saved - 4.75) < 1e-6);
-  assert.equal(rep.split.copilot.sessions, 1);
-  assert.equal(rep.split.copilot.tokens, 1_000_000);
-  assert.ok(Math.abs(rep.split.copilot.cost - 3) < 1e-6);
-  // actual = local + copilot; all-local would have been $0.50
-  assert.ok(Math.abs(rep.actual.cost - 3.25) < 1e-6);
-  assert.ok(Math.abs(rep.actualSavings - 2.75) < 1e-6);
+  assert.ok(Math.abs(rep.split.wfh.saved - 5) < 1e-6); // corp would bill $5, home lab is $0 (unset rates)
+  assert.equal(rep.split.corp.sessions, 1);
+  assert.equal(rep.split.corp.tokens, 1_000_000);
+  assert.ok(Math.abs(rep.split.corp.cost - 3) < 1e-6);
+  // actual = local($0) + copilot($3) = $3; baseline (all local) = 2M @ 0.25/M = $0.50
+  assert.ok(Math.abs(rep.actual.cost - 3) < 1e-6);
+  assert.ok(Math.abs(rep.actualSavings - 2.5) < 1e-6);
 });
 
 // ── new projcache directory layout (dsh update, 2026-09) ────────────────
@@ -540,6 +549,86 @@ test("savePricing: validation", () => {
   assert.equal(out.referenceModel, "my-model");
 });
 
+// ── DeepSeek API + first-table seeding ─────────────────────────────────
+test("priceFor: DeepSeek API is listed + family fallback", () => {
+  setRuntimeTable(builtinEntries(), "claude-opus-4.6");
+  const c = priceFor("deepseek-v4-flash");
+  assert.equal(c.input, 0.44);
+  assert.equal(c.output, 1.32);
+  assert.equal(c.cacheRead, 0.014);
+  assert.equal(c.cacheWrite, 0);
+  assert.equal(c.corp, true);
+  assert.equal(priceFor("deepseek-v4-pro-0813").input, 1.32);
+  assert.equal(priceFor("deepseek-v9.9").input, 0.44); // unknown DeepSeek version -> v4-flash card
+});
+
+test("seedEntries: auto-classifies real usage (DeepSeek API = corp, Qwen = local)", () => {
+  const seeded = seedEntries([
+    { id: "deepseek-v4-flash", provider: "deepseek-official", label: "deepseek-v4-flash" },
+    { id: "deepseek-v4-flash-vision-exp", provider: "deepseek-official", label: "deepseek-v4-flash-vision-exp" },
+    { id: "qwen3.8-27b-q6-gguf", provider: "llamaserver", label: "Qwen3.8-27B-Q6-GGUF" },
+    { id: "snapshots/f1bfb127c64f", provider: "ddd", label: "snapshots/f1bfb127c64f" },
+  ]);
+  const flash = seeded.find((e) => e.id === "deepseek-v4-flash");
+  const qwen = seeded.find((e) => e.id === "qwen3.8-27b-q6-gguf");
+  const snap = seeded.find((e) => e.id === "snapshots/f1bfb127c64f");
+  assert.equal(flash.corp, true);
+  assert.equal(flash.local, false);
+  assert.equal(flash.input, 0.44);
+  assert.equal(qwen.local, true);
+  assert.equal(qwen.corp, false);
+  assert.equal(qwen.input, 0);
+  assert.equal(snap.local, true); // file-path model -> home lab
+});
+
+test("loadPricing: seeds the FIRST table from discovered models", () => {
+  const home = mkdtempSync(join(tmpdir(), "tg-seed-"));
+  const disc = [
+    { id: "deepseek-v4-flash", provider: "deepseek-official", label: "deepseek-v4-flash" },
+    { id: "qwen3.8-27b-q6-gguf", provider: "llamaserver", label: "Qwen3.8-27B-Q6-GGUF" },
+  ];
+  const p = loadPricing(home, disc);
+  assert.equal(p.fromFile, false);
+  assert.equal(p.seeded, true);
+  // known cards stay resolvable (family fallbacks + the WFH reference model)
+  assert.ok(p.models.some((m) => m.id === "claude-opus-4.6"));
+  assert.ok(p.models.some((m) => m.id === "deepseek-v4-flash" && m.corp));
+  assert.ok(p.models.some((m) => m.id === "qwen3.8-27b-q6-gguf" && m.local));
+  assert.equal(p.referenceModel, "claude-opus-4.6");
+  // deepseek keeps its own card from a non-Copilot provider
+  assert.equal(modelKey("deepseek-official", "deepseek-v4-flash"), "deepseek-v4-flash");
+  assert.equal(kindFor("deepseek-official", "deepseek-v4-flash"), "corp");
+  assert.equal(kindFor("llamaserver", "qwen3.8-27b-q6-gguf"), "local");
+});
+
+test("buildReport: DeepSeek API usage lands in the corp bucket (its own card)", () => {
+  const home = mkdtempSync(join(tmpdir(), "tg-ds-"));
+  mkdirSync(join(home, "storages"), { recursive: true });
+  const ws = join(home, "sessions", "--tmp--", "s-ds");
+  mkdirSync(ws, { recursive: true });
+  writeFileSync(join(home, "storages", "session_projcache.json"), JSON.stringify({ tables: { sessions: {
+    "s-ds": { identity: { createdAt: 100, cwd: "/x" }, rows: { tokenUsage: { val: { totals: { uncachedInputTokens: 1_000_000, outputTokens: 100_000, cacheReadTokens: 4_000_000, cacheWriteTokens: 0 } } } } },
+  }}}));
+  const traj = [
+    { type: "session", id: "s-ds", cwd: "/x" },
+    { type: "request/context", data: { provider: "deepseek-official", model: "deepseek-v4-flash" } },
+    { type: "assistant/chunk", data: { turn: 1, step: 1, chunk: { type: "usage", usage: { inputTokens: 1_000_000, outputTokens: 100_000, cacheReadTokens: 4_000_000 } } } },
+  ].map((l) => JSON.stringify(l)).join("\n");
+  writeFileSync(join(ws, "session.jsonl.zstd"), zstdCompressSync(Buffer.from(traj, "utf8")));
+
+  const rep = buildReport({ dshHome: home });
+  const row = rep.byModel.find((m) => m.model === "deepseek-v4-flash");
+  assert.ok(row);
+  assert.equal(row.kind, "corp");
+  assert.ok(Math.abs(row.cost - 0.63) < 1e-6); // 1M*0.44 + 0.1M*1.32 + 4M*0.014 -> $0.63
+  assert.equal(rep.split.corp.sessions, 1);
+  assert.equal(rep.split.wfh.sessions, 0);
+  assert.ok(Math.abs(rep.split.corp.cost - 0.63) < 1e-6);
+  assert.ok(Math.abs(rep.actual.cost - 0.63) < 1e-6);
+  // the what-if comparison now lists DeepSeek API
+  assert.ok(rep.comparison.some((c) => c.id === "deepseek-v4-flash" && c.priced));
+});
+
 // keep the built-in table effective after the file-backed tests mutate it
 test("pricing: built-in table restored for later runs", () => {
   setRuntimeTable(builtinEntries(), "claude-opus-4.6");
@@ -596,7 +685,7 @@ test("buildReport: decode speed per model + global + per session", () => {
 
   const rep = buildReport({ dshHome: home });
   const sonnet = rep.byModel.find((m) => m.model === "claude-sonnet-4.6");
-  const qwen = rep.byModel.find((m) => m.model === "qwen3.8-local");
+  const qwen = rep.byModel.find((m) => m.model === "qwen3.8-27b-q6-gguf");
   assert.equal(sonnet.tokPerSec, 100); // 200 tokens / 2000ms
   assert.equal(qwen.tokPerSec, 50);    // 50 tokens / 1000ms
   assert.equal(rep.decode.tokens, 250);
@@ -654,6 +743,109 @@ test("parseTrajectoryText: no timing at all -> no TTFT (back-compat)", () => {
   assert.deepEqual(r.prefill, { tokens: 0, ms: 0, steps: 0 });
 });
 
+// ── per-step thinking + prefill/decode speed ─────────────────────────────
+test("parseTrajectoryText: thinking (reasoning) time + chars per step", () => {
+  const lines = [
+    { type: "session", id: "s1", cwd: "/x" },
+    { type: "step/start", seq: 1, time: 1000, data: { turn: 1, step: 1 } },
+    { type: "reasoning-chunks", seq0: 2, time0: 3000, data: { turn: 1, step: 1, texts: ["abcd"] } },
+    { type: "reasoning-chunks", seq0: 3, time0: 5000, data: { turn: 1, step: 1, texts: ["efgh"] } },
+    { type: "assistant/chunk", time: 3000, data: { turn: 1, step: 1, chunk: { type: "block-start", index: 0, blockType: "reasoning" } } },
+    { type: "assistant/chunk", time: 3200, data: { turn: 1, step: 1, chunk: { type: "reasoning-delta", text: "aaaaaaaaaaaaaaaaaaaa" } } }, // 20 chars — delta stream is the authoritative full thinking text
+    { type: "assistant/chunk", time: 6000, data: { turn: 1, step: 1, chunk: { type: "usage", usage: { inputTokens: 100, outputTokens: 200, reasoningTokens: 0 } } } },
+  ].map((l) => JSON.stringify(l)).join("\n");
+  const r = parseTrajectoryText(lines);
+  assert.equal(r.usage[0].thinkingMs, 2000); // last reasoning-chunk 5000 - first 3000
+  assert.equal(r.usage[0].thinkingChars, 20); // max("abcd"+"efgh"=8, reasoning-delta=20) — the delta stream wins
+  assert.equal(r.usage[0].buckets.reasoningTokens, 0);
+});
+
+test("buildBreakdown: per-step prefill/decode speed + thinking (estimated)", () => {
+  const home = mkdtempSync(join(tmpdir(), "tg-step-"));
+  mkdirSync(join(home, "storages"), { recursive: true });
+  const ws = join(home, "sessions", "--tmp--", "s-st");
+  mkdirSync(ws, { recursive: true });
+  writeFileSync(join(home, "storages", "session_projcache.json"), JSON.stringify({ tables: { sessions: {
+    "s-st": { identity: { createdAt: 100, cwd: "/x" }, rows: { tokenUsage: { val: { totals: { uncachedInputTokens: 100, outputTokens: 200, cacheReadTokens: 0, cacheWriteTokens: 0 } } } } },
+  }}}));
+  const traj = [
+    { type: "session", id: "s-st", cwd: "/x" },
+    { type: "step/start", seq: 1, time: 1000, data: { turn: 1, step: 1 } },
+    { type: "reasoning-chunks", seq0: 2, time0: 3000, data: { turn: 1, step: 1, texts: ["abcd"] } },
+    { type: "reasoning-chunks", seq0: 3, time0: 5000, data: { turn: 1, step: 1, texts: ["efgh"] } },
+    { type: "assistant/chunk", time: 3000, data: { turn: 1, step: 1, chunk: { type: "block-start", index: 0, blockType: "reasoning" } } },
+    { type: "assistant/chunk", time: 6000, data: { turn: 1, step: 1, chunk: { type: "usage", usage: { inputTokens: 100, outputTokens: 200, reasoningTokens: 0 } } } },
+    { type: "step/end", seq: 4, time: 6100, data: { turn: 1, step: 1 } },
+  ].map((l) => JSON.stringify(l)).join("\n");
+  writeFileSync(join(ws, "session.jsonl.zstd"), zstdCompressSync(Buffer.from(traj, "utf8")));
+  const bd = buildBreakdown({ dshHome: home });
+  assert.equal(bd.bySession.length, 1);
+  const s = bd.bySession[0];
+  assert.ok(s.steps && s.steps.length === 1);
+  const st = s.steps[0];
+  assert.equal(st.in, 100);
+  assert.equal(st.out, 200);
+  assert.equal(st.thinking, 2); // estimated: ceil(8 chars / 4)
+  assert.equal(st.thinkingEstimated, true);
+  assert.equal(st.thinkingMs, 2000);
+  assert.equal(st.prefillTokPerSec, 50); // 100 tokens / 2000ms TTFT
+  assert.ok(Math.abs(st.decodeTokPerSec - 66.7) < 0.05); // 200 / 3000ms
+});
+
+test("buildBreakdown: per-step thinking uses authoritative reasoningTokens when present", () => {
+  const home = mkdtempSync(join(tmpdir(), "tg-step2-"));
+  mkdirSync(join(home, "storages"), { recursive: true });
+  const ws = join(home, "sessions", "--tmp--", "s-st2");
+  mkdirSync(ws, { recursive: true });
+  writeFileSync(join(home, "storages", "session_projcache.json"), JSON.stringify({ tables: { sessions: {
+    "s-st2": { identity: { createdAt: 100, cwd: "/x" }, rows: { tokenUsage: { val: { totals: { uncachedInputTokens: 100, outputTokens: 200, cacheReadTokens: 0, cacheWriteTokens: 0 } } } } },
+  }}}));
+  const traj = [
+    { type: "session", id: "s-st2", cwd: "/x" },
+    { type: "step/start", seq: 1, time: 1000, data: { turn: 1, step: 1 } },
+    { type: "assistant/chunk", time: 3000, data: { turn: 1, step: 1, chunk: { type: "block-start", index: 0, blockType: "reasoning" } } },
+    { type: "assistant/chunk", time: 6000, data: { turn: 1, step: 1, chunk: { type: "usage", usage: { inputTokens: 100, outputTokens: 200, reasoningTokens: 150 } } } },
+    { type: "step/end", seq: 4, time: 6100, data: { turn: 1, step: 1 } },
+  ].map((l) => JSON.stringify(l)).join("\n");
+  writeFileSync(join(ws, "session.jsonl.zstd"), zstdCompressSync(Buffer.from(traj, "utf8")));
+  const bd = buildBreakdown({ dshHome: home });
+  const st = bd.bySession[0].steps[0];
+  assert.equal(st.thinking, 150); // authoritative reasoningTokens, not estimated
+  assert.equal(st.thinkingEstimated, false);
+});
+
+test("buildBreakdown: per-tool tokens report the ACTUAL payload, not the whole step", () => {
+  const home = mkdtempSync(join(tmpdir(), "tg-payload-"));
+  mkdirSync(join(home, "storages"), { recursive: true });
+  const ws = join(home, "sessions", "--tmp--", "s-pl");
+  mkdirSync(ws, { recursive: true });
+  writeFileSync(join(home, "storages", "session_projcache.json"), JSON.stringify({ tables: { sessions: {
+    "s-pl": { identity: { createdAt: 100, cwd: "/x" }, rows: { tokenUsage: { val: { totals: { uncachedInputTokens: 100, outputTokens: 200, cacheReadTokens: 0, cacheWriteTokens: 0 } } } } },
+  }}}));
+  const args = "a".repeat(800); // 800 chars -> 200 tokens payload
+  const traj = [
+    { type: "session", id: "s-pl", cwd: "/x" },
+    { type: "step/start", seq: 1, time: 1000, data: { turn: 1, step: 1 } },
+    { type: "assistant/chunk", time: 3000, data: { turn: 1, step: 1, chunk: { type: "usage", usage: { inputTokens: 100, outputTokens: 200, reasoningTokens: 0 } } } },
+    { type: "step/end", seq: 4, time: 6100, data: { turn: 1, step: 1 } },
+    { type: "tool/call", seq: 5, data: { name: "remember", arguments: args } },
+  ].map((l) => JSON.stringify(l)).join("\n");
+  writeFileSync(join(ws, "session.jsonl.zstd"), zstdCompressSync(Buffer.from(traj, "utf8")));
+  const bd = buildBreakdown({ dshHome: home });
+  const s = bd.bySession[0];
+  assert.ok(s.toolTokens && s.toolTokens.length === 1);
+  const t = s.toolTokens[0];
+  assert.equal(t.tool, "remember");
+  assert.equal(t.calls, 1);
+  assert.equal(t.total, 200); // payload = ceil(800 chars / 4), NOT the step's 300 context tokens
+  assert.equal(t.min, 200);
+  assert.equal(t.avg, 200);
+  assert.equal(t.max, 200);
+});
+
+
+
+
 test("buildPerformance: per model + per session x model (model switch)", () => {
   const home = mkdtempSync(join(tmpdir(), "tg-perf-"));
   mkdirSync(join(home, "storages"), { recursive: true });
@@ -683,7 +875,7 @@ test("buildPerformance: per model + per session x model (model switch)", () => {
   assert.equal(perf.totals.prefill.avgTtftMs, 1250); // (2000+500)/2
   // per model
   const sonnet = perf.byModel.find((m) => m.model === "claude-sonnet-4.6");
-  const qwen = perf.byModel.find((m) => m.model === "qwen3.8-local");
+  const qwen = perf.byModel.find((m) => m.model === "qwen3.8-27b-q6-gguf");
   assert.ok(sonnet && qwen);
   assert.equal(sonnet.tokPerSec, 100); // 200 / 2s
   assert.equal(sonnet.promptTokPerSec, 500); // 1000 / 2s
@@ -698,7 +890,7 @@ test("buildPerformance: per model + per session x model (model switch)", () => {
   assert.equal(s.modelCount, 2);
   assert.equal(s.models.length, 2);
   const sSonnet = s.models.find((m) => m.model === "claude-sonnet-4.6");
-  const sQwen = s.models.find((m) => m.model === "qwen3.8-local");
+  const sQwen = s.models.find((m) => m.model === "qwen3.8-27b-q6-gguf");
   assert.equal(sSonnet.tokPerSec, 100);
   assert.equal(sSonnet.promptTokPerSec, 500);
   assert.equal(sQwen.tokPerSec, 100);
@@ -733,3 +925,65 @@ test("buildReport: prefill aggregate + byModel prompt fields", () => {
   assert.equal(m.avgTtftMs, 2000);
   assert.equal(m.avgContext, 1000);
 });
+
+// ── reprocess (force a full re-parse of historic trajectories) ──────────
+test("reprocessTrajectories: clears the parse cache and re-parses everything", () => {
+  const home = mkdtempSync(join(tmpdir(), "tg-reproc-"));
+  mkdirSync(join(home, "storages"), { recursive: true });
+  const ws = join(home, "sessions", "--tmp--", "s-r");
+  mkdirSync(ws, { recursive: true });
+  writeFileSync(join(home, "storages", "session_projcache.json"), JSON.stringify({ tables: { sessions: {
+    "s-r": { identity: { createdAt: 100, cwd: "/x" }, rows: { tokenUsage: { val: { totals: { uncachedInputTokens: 1000, outputTokens: 200, cacheReadTokens: 0, cacheWriteTokens: 0 } } } } },
+  }}}));
+  const traj = [
+    { type: "session", id: "s-r", cwd: "/x" },
+    { type: "request/context", data: { provider: "qweno", model: "Qwen3.8-27B-Q6-GGUF" } },
+    { type: "assistant/chunk", data: { turn: 1, step: 1, chunk: { type: "usage", usage: { inputTokens: 1000, outputTokens: 200, cacheReadTokens: 0 } } } },
+  ].map((l) => JSON.stringify(l)).join("\n");
+  writeFileSync(join(ws, "session.jsonl.zstd"), zstdCompressSync(Buffer.from(traj, "utf8")));
+
+  // Cold build: parses the file.
+  let rep = buildReport({ dshHome: home });
+  assert.equal(rep.sources.trajectories.files, 1);
+  assert.ok(rep.sources.trajectories.cache.recomputed >= 1);
+
+  // Warm build: served from the parse cache (no re-parse).
+  rep = buildReport({ dshHome: home });
+  assert.ok(rep.sources.trajectories.cache.hits >= 1);
+  assert.equal(rep.sources.trajectories.cache.recomputed, 0);
+
+  // Reprocess forces a clean re-parse of the historic file, then persists a fresh cache.
+  const r = reprocessTrajectories({ dshHome: home });
+  assert.equal(r.files, 1);
+  assert.equal(r.withUsage, 1);
+  assert.ok(r.cache.recomputed >= 1);
+  assert.equal(r.cache.hits, 0); // the cache was wiped, so nothing came from cache
+  assert.equal(r.defaultModel, null); // no settings.yaml default in this fixture
+
+  // After reprocessing, the report reflects the same data (recomputed cleanly).
+  rep = buildReport({ dshHome: home });
+  assert.equal(rep.sources.trajectories.files, 1);
+  assert.ok(rep.sources.trajectories.cache.hits >= 1); // the fresh cache is now warm
+});
+
+test("discoverLocalModels: distinct local models from trajectories, not folded into qwen baseline", () => {
+  const home = mkdtempSync(join(tmpdir(), "tg-disc-"));
+  const ws = join(home, "sessions", "--tmp--", "s-disc");
+  mkdirSync(ws, { recursive: true });
+  const traj = [
+    { type: "session", id: "s-disc", cwd: "/x" },
+    { type: "request/header", seq: 0, data: { header: { config: { provider: "llamaserver", model: "Qwen3.8-27B-Q6-GGUF" } } } },
+    { type: "request/header", seq: 1, data: { header: { config: { provider: "llamaserver", model: "Qwen3.8-27B-Q4-GGUF" } } } },
+    { type: "request/header", seq: 2, data: { header: { config: { provider: "github-copilot-official", model: "claude-sonnet-4.6" } } } },
+  ].map((l) => JSON.stringify(l)).join("\n");
+  writeFileSync(join(ws, "session.jsonl.zstd"), zstdCompressSync(Buffer.from(traj, "utf8")));
+  const out = discoverLocalModels(home);
+  const ids = out.map((m) => m.id);
+  // the two local qwen variants are returned separately (not merged), each marked with its provider
+  assert.ok(ids.includes("qwen3.8-27b-q6-gguf"));
+  assert.ok(ids.includes("qwen3.8-27b-q4-gguf"));
+  assert.equal(out.every((m) => m.provider === "llamaserver"), true);
+  // the copilot/claude model is NOT a local model -> excluded
+  assert.ok(!ids.includes("claude-sonnet-4.6"));
+});
+

@@ -1,0 +1,181 @@
+/* token-gobbler · scoped styles */
+
+/* ── base ──────────────────────────────────────────────────────────────── */
+.tg-root,.tg-modal-overlay{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#e5e7eb;line-height:1.45}
+.tg-root *,.tg-modal-overlay *{box-sizing:border-box}
+.tg-num{font-variant-numeric:tabular-nums;font-feature-settings:'tnum'}
+
+/* ── cards ─────────────────────────────────────────────────────────────── */
+.tg-card{background:linear-gradient(180deg,rgba(255,255,255,0.045),rgba(255,255,255,0.015));border:1px solid rgba(255,255,255,0.08);border-radius:14px}
+.tg-label{font-size:11px;font-weight:600;letter-spacing:0.06em;text-transform:uppercase;color:#94a3b8}
+.tg-faint{color:#64748b}
+.tg-sec{font-size:11px;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;color:#64748b}
+.tg-muted{color:#94a3b8}
+
+/* ── stat cards ────────────────────────────────────────────────────────── */
+.tg-stat{padding:14px 16px;transition:border-color .15s ease,transform .15s ease}
+.tg-stat:hover{border-color:rgba(255,255,255,0.2);transform:translateY(-2px)}
+.tg-stat-dot{width:7px;height:7px;border-radius:50%;display:inline-block;flex:none}
+.tg-stat-value{font-size:22px;font-weight:700;margin-top:7px;letter-spacing:-0.01em}
+.tg-stat-total{border-color:rgba(251,191,36,0.35);background:linear-gradient(180deg,rgba(251,191,36,0.10),rgba(255,255,255,0.02))}
+.tg-stat-total .tg-stat-value{color:#fbbf24;font-size:24px}
+
+/* ── hero / WFH ────────────────────────────────────────────────────────── */
+.tg-hero{padding:18px 20px;background:linear-gradient(180deg,rgba(255,255,255,0.05),rgba(255,255,255,0.02));border:1px solid rgba(255,255,255,0.1)}
+.tg-hero-value{font-size:34px;font-weight:800;letter-spacing:-0.02em;margin-top:2px}
+.tg-wfh{padding:18px 20px;background:linear-gradient(180deg,rgba(16,185,129,0.10),rgba(255,255,255,0.02));border:1px solid rgba(16,185,129,0.32)}
+.tg-wfh-value{font-size:28px;font-weight:800;letter-spacing:-0.02em;margin-top:2px;color:#34d399}
+.tg-badge{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:700;padding:5px 11px;border-radius:999px;background:rgba(16,185,129,0.16);border:1px solid rgba(16,185,129,0.35);color:#34d399;white-space:nowrap}
+
+/* ── segmented control ─────────────────────────────────────────────────── */
+.tg-seg{display:inline-flex;gap:3px;padding:3px;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);border-radius:10px}
+.tg-seg-btn{font-size:12px;font-weight:600;padding:5px 13px;border-radius:7px;border:none;cursor:pointer;color:#94a3b8;background:transparent;transition:background .15s ease,color .15s ease}
+.tg-seg-btn:hover{color:#e5e7eb}
+.tg-seg-btn.active{background:rgba(251,191,36,0.16);color:#fde68a}
+
+/* ── tables ────────────────────────────────────────────────────────────── */
+.tg-table{width:100%;border-collapse:separate;border-spacing:0;font-size:13px}
+.tg-th{text-align:left;font-size:11px;font-weight:600;letter-spacing:0.05em;text-transform:uppercase;color:#94a3b8;padding:10px 12px;border-bottom:1px solid rgba(255,255,255,0.12);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
+.tg-sticky .tg-th{position:sticky;top:0;z-index:2;background:#0d1524}
+.tg-th-r{text-align:right}
+.tg-td{padding:11px 12px;border-bottom:1px solid rgba(255,255,255,0.05);color:#e5e7eb;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
+.tg-td-r{text-align:right}
+.tg-tr{transition:background .12s ease}
+.tg-tr:hover{background:rgba(255,255,255,0.03)}
+.tg-tr:last-child .tg-td{border-bottom:none}
+.tg-kind{font-size:12px;font-weight:600}
+
+/* ── scroll containers ─────────────────────────────────────────────────── */
+.tg-scroll{overflow-x:auto}
+.tg-scroll::-webkit-scrollbar{height:8px}
+.tg-scroll::-webkit-scrollbar-thumb{background:rgba(255,255,255,0.12);border-radius:4px}
+.tg-scroll::-webkit-scrollbar-track{background:transparent}
+.tg-tscroll{overflow:visible}
+
+/* ── buttons ───────────────────────────────────────────────────────────── */
+.tg-refresh{display:inline-flex;align-items:center;gap:7px;font-size:12px;font-weight:700;padding:7px 14px;border-radius:9px;cursor:pointer;border:1px solid rgba(251,191,36,0.4);background:rgba(251,191,36,0.12);color:#fde68a;transition:background .15s ease,transform .1s ease,border-color .15s ease;white-space:nowrap}
+.tg-refresh:hover{background:rgba(251,191,36,0.2);border-color:rgba(251,191,36,0.6)}
+.tg-refresh:active{transform:scale(0.97)}
+.tg-refresh:disabled{opacity:0.55;cursor:default}
+.tg-reprocess{display:inline-flex;align-items:center;gap:7px;font-size:12px;font-weight:700;padding:7px 14px;border-radius:9px;cursor:pointer;border:1px solid rgba(167,139,250,0.4);background:rgba(167,139,250,0.12);color:#c4b5fd;transition:background .15s ease,transform .1s ease,border-color .15s ease;white-space:nowrap}
+.tg-reprocess:hover{background:rgba(167,139,250,0.22);border-color:rgba(167,139,250,0.6)}
+.tg-reprocess:active{transform:scale(0.97)}
+.tg-reprocess:disabled{opacity:0.55;cursor:default}
+.tg-ghost{font-size:12px;font-weight:600;padding:7px 12px;border-radius:9px;cursor:pointer;border:1px solid rgba(255,255,255,0.14);background:rgba(255,255,255,0.04);color:#cbd5e1;transition:background .15s ease,border-color .15s ease;white-space:nowrap}
+.tg-ghost:hover{background:rgba(255,255,255,0.09);border-color:rgba(255,255,255,0.24)}
+.tg-ghost:disabled{opacity:0.55;cursor:default}
+
+/* ── FAB ───────────────────────────────────────────────────────────────── */
+.tg-fab{position:fixed;bottom:22px;right:22px;z-index:1;width:46px;height:46px;border-radius:50%;border:1px solid rgba(251,191,36,0.45);background:rgba(20,16,8,0.82);backdrop-filter:blur(8px);box-shadow:0 8px 24px rgba(0,0,0,0.45);cursor:pointer;font-size:20px;line-height:1;display:flex;align-items:center;justify-content:center;transition:transform .12s ease,background .15s ease,border-color .15s ease}
+.tg-fab:hover{transform:scale(1.06);background:rgba(40,30,12,0.9);border-color:rgba(251,191,36,0.7)}
+.tg-fab:active{transform:scale(0.97)}
+
+/* ── modal ─────────────────────────────────────────────────────────────── */
+.tg-modal-overlay{position:fixed;inset:0;z-index:2;display:flex;align-items:center;justify-content:center}
+.tg-modal-mask{position:absolute;inset:0;background:rgba(2,6,12,0.62);backdrop-filter:blur(3px)}
+.tg-modal-panel{position:relative;z-index:1;width:min(1180px,calc(100vw - 48px));height:min(860px,calc(100vh - 48px));background:linear-gradient(180deg,#0e1626,#0b111d);border:1px solid rgba(255,255,255,0.1);border-radius:20px;box-shadow:0 24px 80px rgba(0,0,0,0.6);display:flex;flex-direction:column;overflow:hidden;color:#e5e7eb}
+.tg-modal-header{flex:none;display:flex;justify-content:space-between;align-items:flex-start;gap:12px;padding:18px 20px 14px;border-bottom:1px solid rgba(255,255,255,0.07)}
+.tg-close{cursor:pointer;width:30px;height:30px;border-radius:50%;border:1px solid rgba(255,255,255,0.14);background:rgba(255,255,255,0.04);color:#cbd5e1;font-size:14px;display:flex;align-items:center;justify-content:center;transition:background .15s ease,border-color .15s ease,color .15s ease}
+.tg-close:hover{background:rgba(248,113,113,0.18);border-color:rgba(248,113,113,0.4);color:#fca5a5}
+.tg-modal-body{flex:1;min-height:0;overflow:auto;padding:20px}
+.tg-modal-body::-webkit-scrollbar{width:10px;height:8px}
+.tg-modal-body::-webkit-scrollbar-thumb{background:rgba(255,255,255,0.12);border-radius:5px}
+
+/* ── chips ─────────────────────────────────────────────────────────────── */
+.tg-chipgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px}
+.tg-chip{display:flex;align-items:center;gap:8px;padding:11px 13px;background:linear-gradient(180deg,rgba(255,255,255,0.04),rgba(255,255,255,0.015));border:1px solid rgba(255,255,255,0.08);border-radius:12px}
+.tg-chip-label{font-size:12px;color:#94a3b8;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tg-chip-value{font-size:16px;font-weight:700;color:#f1f5f9}
+.tg-bar{height:8px;border-radius:4px;background:linear-gradient(90deg,#f59e0b,#fbbf24);min-width:2px}
+
+/* ── rows / chevrons ───────────────────────────────────────────────────── */
+.tg-row-btn{cursor:pointer}
+.tg-chev{display:inline-block;width:14px;font-size:10px;color:#64748b;transition:transform .15s ease}
+.tg-chev.open{transform:rotate(90deg);color:#fbbf24}
+
+/* ── drawer ────────────────────────────────────────────────────────────── */
+.tg-drawer-row{background:rgba(255,255,255,0.02)}
+.tg-drawer-inner{padding:16px 18px 18px 42px;display:flex;flex-direction:column;gap:16px;width:100%;min-width:0;max-width:100%;box-sizing:border-box}
+/* scrollable sub-tables inside drawers (per-step, tool payload, etc.) */
+.tg-scrollable{max-height:320px;overflow-y:auto;overscroll-behavior:contain;border-radius:8px}
+.tg-scrollable::-webkit-scrollbar{width:7px}
+.tg-scrollable::-webkit-scrollbar-thumb{background:rgba(255,255,255,0.10);border-radius:4px}
+.tg-scrollable::-webkit-scrollbar-track{background:transparent}
+.tg-group td{padding:8px 12px 4px;font-size:11px;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;color:#64748b;border-bottom:1px solid rgba(255,255,255,0.08);background:rgba(255,255,255,0.02);position:sticky;top:0}
+.tg-meta-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:8px}
+.tg-meta{background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.06);border-radius:9px;padding:8px 10px;min-width:0}
+.tg-meta-k{font-size:10px;font-weight:600;letter-spacing:0.05em;text-transform:uppercase;color:#64748b}
+.tg-meta-v{font-size:12.5px;color:#e5e7eb;margin-top:3px;word-break:break-word}
+.tg-drawer-sec{font-size:11px;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;color:#94a3b8;margin-bottom:8px}
+.tg-drawer-sub{font-size:11px;font-weight:600;color:#64748b;margin-bottom:6px}
+.tg-turn{border-left:2px solid rgba(251,191,36,0.45);padding:6px 12px;margin-bottom:8px;background:rgba(255,255,255,0.02);border-radius:0 8px 8px 0}
+.tg-turn-p{font-size:12.5px;color:#e5e7eb;font-weight:600;word-break:break-word}
+.tg-turn-r{font-size:12px;color:#94a3b8;margin-top:4px;line-height:1.5;word-break:break-word}
+
+/* ── inputs ────────────────────────────────────────────────────────────── */
+.tg-input{background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.12);border-radius:7px;color:#e5e7eb;font-size:12.5px;padding:6px 8px;font-variant-numeric:tabular-nums;min-width:0}
+.tg-input:focus{outline:none;border-color:rgba(251,191,36,0.55)}
+.tg-input-num{text-align:right;-webkit-appearance:none;-moz-appearance:textfield;appearance:textfield}
+/* hide number spinners — they reserve a box that crowds the right-aligned value */
+.tg-input-num::-webkit-outer-spin-button,.tg-input-num::-webkit-inner-spin-button{-webkit-appearance:none;appearance:none;margin:0}
+.tg-input-label{width:100%}
+.tg-input-id{width:100%;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11.5px;color:#94a3b8}
+
+/* ── pricing rate field (2-col grid inside a card) ─────────────────────── */
+.tg-rate-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px 12px}
+.tg-rate-field{display:flex;flex-direction:column;gap:4px;min-width:0}
+.tg-rate-field input{width:100%;min-width:0}
+
+/* ── perf bar chart (reusable metricBars) ──────────────────────────────── */
+/* (metricBars was replaced by amCharts — see client/amchart.tsx. These legacy
+   classes are kept only as a fallback and for the simple tool-share bar.) */
+/* .tg-chart is width:100% + min/max-width:0 so a chart with hundreds of bars
+   never expands its parent (the drawer <td> / modal) — the bars scroll inside
+   .tg-barchart instead. Legend is a bullet list outside the chart. */
+.tg-chart{display:flex;flex-direction:column;gap:8px;width:100%;min-width:0;max-width:100%}
+.tg-barchart{display:flex;align-items:flex-end;gap:3px;overflow-x:auto;width:100%;min-width:0;max-width:100%;padding:0 2px 2px}
+.tg-barchart::-webkit-scrollbar{height:7px}
+.tg-barchart::-webkit-scrollbar-thumb{background:rgba(255,255,255,0.10);border-radius:4px}
+.tg-barstep{display:flex;flex-direction:column;align-items:center;gap:2px;flex:none;min-width:24px}
+.tg-bararea{height:150px;display:flex;align-items:flex-end;gap:2px}
+.tg-bar{width:9px;border-radius:2px 2px 0 0;min-height:2px}
+.tg-bar-decode{background:#38bdf8}
+.tg-bar-prefill{background:#2dd4bf}
+.tg-bar-in{background:#60a5fa}
+.tg-bar-out{background:#a78bfa}
+.tg-bar-cache{background:#2dd4bf}
+.tg-bar-think{background:#c084fc}
+.tg-barstep-x{font-size:9px;color:#64748b;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;white-space:nowrap}
+.tg-barstep-sub{font-size:8px;color:#64748b;max-width:56px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tg-legend{list-style:disc;margin:0;padding-left:20px;font-size:11px;color:#94a3b8;display:flex;flex-direction:column;gap:3px}
+.tg-legend-i{display:flex;align-items:center;gap:6px}
+.tg-legend-dot{width:10px;height:10px;border-radius:2px;display:inline-block;flex:none}
+
+/* ── amCharts column chart (reusable AmBarChart) ───────────────────────── */
+/* amCharts renders an SVG sized to its container; the container is width:100%
+   and min-width:0, so a chart with hundreds of categories stays inside the
+   drawer <td> / modal instead of pushing it wide. */
+.tg-amchart{width:100%;min-width:0;max-width:100%;position:relative;border-radius:10px;overflow:hidden}
+.tg-amchart-err{display:flex;align-items:center;justify-content:center;color:#f87171;font-size:12.5px;padding:12px}
+/* wrapper so the turn chips sit above the chart without widening it */
+.tg-amchart-wrap{width:100%;min-width:0;max-width:100%;display:flex;flex-direction:column;gap:8px}
+/* turn chips — one per turn; click to zoom the chart to that turn */
+.tg-turn-chips{display:flex;flex-wrap:wrap;gap:6px}
+.tg-turn-chip{font-size:11px;font-weight:600;padding:3px 9px;border-radius:999px;border:1px solid rgba(255,255,255,0.12);background:rgba(255,255,255,0.04);color:#94a3b8;cursor:pointer;white-space:nowrap;transition:background .12s ease,color .12s ease,border-color .12s ease}
+.tg-turn-chip:hover{background:rgba(255,255,255,0.1);color:#e5e7eb}
+.tg-turn-chip.active{background:rgba(251,191,36,0.16);color:#fde68a;border-color:rgba(251,191,36,0.4)}
+
+/* ── collapse (reusable) ───────────────────────────────────────────────── */
+.tg-collapse{display:flex;flex-direction:column;gap:8px}
+.tg-collapse-head{display:inline-flex;align-items:center;gap:7px;font-size:12px;font-weight:600;color:#cbd5e1;padding:6px 11px;border-radius:8px;border:1px solid rgba(255,255,255,0.1);background:rgba(255,255,255,0.03);cursor:pointer;width:fit-content;transition:background .12s ease,border-color .12s ease}
+.tg-collapse-head:hover{background:rgba(255,255,255,0.07);border-color:rgba(255,255,255,0.18)}
+
+/* ── misc ──────────────────────────────────────────────────────────────── */
+/* delete button — same height & radius as the corp/local <select> (.tg-input) so they
+   sit level in the card-header flex row. padding:6px 11px + line-height:1.45 ≈ 30px. */
+.tg-del{cursor:pointer;color:#64748b;font-size:12.5px;line-height:1.45;padding:6px 11px;border-radius:7px;border:1px solid rgba(255,255,255,0.1);background:transparent;transition:color .12s ease,border-color .12s ease,background .12s ease}
+.tg-del:hover{color:#fca5a5;border-color:rgba(248,113,113,0.4);background:rgba(248,113,113,0.10)}
+.tg-flash-ok{color:#34d399;font-size:12.5px;font-weight:600}
+.tg-flash-err{color:#f87171;font-size:12.5px;font-weight:600}
+.tg-refrow{display:flex;align-items:center;gap:14px;flex-wrap:wrap;padding:14px 16px}
+.tg-kind-badge{font-size:11px;font-weight:700;padding:3px 10px;border-radius:999px;white-space:nowrap}

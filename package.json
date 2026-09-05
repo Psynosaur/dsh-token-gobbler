@@ -24,7 +24,8 @@
     "README.md",
     "cordis.patch.yml",
     "lib/**",
-    "bin/**"
+    "bin/**",
+    "vendor/**"
   ],
   "dsh": {
     "bundle": {
@@ -45,6 +46,13 @@
   "scripts": {
     "test": "node --test test/*.test.js",
     "usage": "node bin/token-gobbler.js",
-    "usage:json": "node bin/token-gobbler.js --json"
+    "usage:json": "node bin/token-gobbler.js --json",
+    "build:client": "esbuild client/index.ts --bundle --format=iife --target=es2022 --platform=browser --external:react --external:react/jsx-runtime --loader:.css=text --outfile=lib/client.js",
+    "watch:client": "esbuild client/index.ts --bundle --format=iife --target=es2022 --platform=browser --external:react --external:react/jsx-runtime --loader:.css=text --outfile=lib/client.js --watch",
+    "typecheck:client": "tsc -p tsconfig.client.json"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.2",
+    "typescript": "^7.0.2"
   }
 }

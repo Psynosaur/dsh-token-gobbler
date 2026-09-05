@@ -6,7 +6,7 @@
 //   token-gobbler --json          machine-readable
 //   token-gobbler --dsh-home DIR  override DSH home (default ~/.dsh)
 import { buildReport, buildBreakdown, priceTotals, addSavings } from "../lib/report.js";
-import { priceFor, costFor, emptyBuckets } from "../lib/pricing.js";
+import { priceFor, costFor, emptyBuckets, kindFor } from "../lib/pricing.js";
 import { parseStatsSnapshot } from "../lib/trajectory.js";
 
 const argv = process.argv.slice(2);
@@ -55,7 +55,7 @@ const rollupModels = (rows) => {
       const card = priceFor(m.key);
       const b = {}; for (const k of B) b[k] = Math.round(m[k]);
       const all = b.uncachedInputTokens + b.outputTokens + b.cacheReadTokens + b.cacheWriteTokens;
-      return { model: m.key, label: card ? card.label : m.key, copilot: /copilot/i.test(String(m.provider || "")), sessions: m.sessions.size, steps: m.steps, ...b, allTokens: all, cost: card ? Math.round(costFor(b, card) * 100) / 100 : null };
+      return { model: m.key, label: card ? card.label : m.key, copilot: /copilot/i.test(String(m.provider || "")), kind: kindFor(m.provider, m.key), sessions: m.sessions.size, steps: m.steps, ...b, allTokens: all, cost: card ? Math.round(costFor(b, card) * 100) / 100 : null };
     })
     .sort((a, b) => b.allTokens - a.allTokens);
 };
@@ -128,7 +128,9 @@ console.log(bold("  ACTUAL (what you actually ran)"));
 console.log(line());
 console.log("  " + green(money(actualCost)) + "  " + dim(report.actual.note));
 if (actualSavings > 0) {
-  console.log("  " + green("💰 All-local (Qwen) would've been " + money(savings.baselineCost) + " — the home lab saved " + money(actualSavings) + " vs what you actually spent."));
+  const baseModel = (comparison || []).find((c) => c.baseline);
+  const baseName = baseModel ? String(baseModel.label || baseModel.id || "local").replace(/ — what you ran$/, "") : "local";
+  console.log("  " + green("💰 All-" + baseName + " would've been " + money(savings.baselineCost) + " — the home lab saved " + money(actualSavings) + " vs what you actually spent."));
 }
 console.log();
 console.log(bold("  BY MODEL (what you actually ran)"));
@@ -136,7 +138,7 @@ console.log(line());
 console.log("  " + "MODEL".padEnd(30) + " " + "KIND".padEnd(8) + " " + "SESS".padStart(5) + "  " + "INPUT".padStart(10) + "  " + "OUTPUT".padStart(10) + "  " + "CACHE R".padStart(11) + "  " + "COST".padStart(10));
 for (const m of byModel) {
   const cost = m.cost != null ? money(m.cost) : yellow("unpriced");
-  const kind = m.copilot ? "Copilot" : dim("local");
+  const kind = m.kind === "corp" ? "corp" : dim("local");
   console.log("  " + m.label.slice(0, 30).padEnd(30) + " " + kind.padEnd(8) + " " + String(m.sessions).padStart(5) + "  " + fmtC(m.uncachedInputTokens).padStart(10) + "  " + fmtC(m.outputTokens).padStart(10) + "  " + fmtC(m.cacheReadTokens).padStart(11) + "  " + cost.padStart(10));
 }
 console.log();
@@ -151,7 +153,7 @@ for (const c of comparison) {
 }
 if (savings && savings.max > 0) {
   const range = (savings.min > 0 && savings.min < savings.max) ? money(savings.min) + "–" + money(savings.max) : money(savings.max);
-  console.log("  " + green("💰 You save " + range + " by running local instead of Copilot."));
+  console.log("  " + green("💰 You save " + range + " by running local instead of the corp."));
 }
 
 // ── ACTIVITY (events + tools) ────────────────────────────────────────────
