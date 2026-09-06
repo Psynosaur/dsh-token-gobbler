@@ -1,4 +1,4 @@
-// token-gobbler · pricing.js
+// token-gobbler · pricing.ts
 // Per-1M-token rate cards + cost math. Pure ESM, no deps.
 //
 // Bucket naming matches DSH's session projection:
@@ -23,12 +23,67 @@
 // DeepSeek rates come from api.deepseek.com (peak; off-peak is half price).
 // Grok and Claude Sonnet 5 are ESTIMATES and flagged with estimated:true.
 
-const P = (input, output, cacheRead, cacheWrite, estimated = false, label = "", corp = false) => ({
+/** A rate card: per-1M-token prices (USD) for one model id. */
+export interface RateCard {
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+  estimated: boolean;
+  label: string;
+  corp?: boolean;
+  local?: boolean;
+}
+
+/** A user-editable pricing table row (what the Pricing tab holds per model). */
+export interface PricingEntry {
+  id: string;
+  label?: string;
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+  estimated: boolean;
+  local: boolean;
+  corp: boolean;
+  provider?: string | null;
+}
+
+/** The four token buckets DSH tracks per session. */
+export interface TokenBuckets {
+  uncachedInputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  reasoningTokens?: number;
+}
+
+/** A partial bucket set (any field may be absent; treated as 0). */
+export type BucketsLike = Partial<TokenBuckets>;
+
+/** A model the trajectory revealed (id + optional label/provider). */
+export interface DiscoveredModel {
+  id: string;
+  label?: string;
+  provider?: string | null;
+  steps?: number;
+}
+
+/** Per-bucket USD cost breakdown for a bucket set under a rate card. */
+export interface CostBreakdown {
+  inputCost: number;
+  outputCost: number;
+  cacheReadCost: number;
+  cacheWriteCost: number;
+  total: number;
+}
+
+const P = (input: number, output: number, cacheRead: number, cacheWrite: number, estimated = false, label = "", corp = false): RateCard => ({
   input, output, cacheRead, cacheWrite, estimated, label, corp,
 });
 
 /** Rate card keyed by normalized model id. corp:true = billed, local:true = home lab ($0). */
-export const PRICING = {
+export const PRICING: Record<string, RateCard> = {
   // ── Anthropic (authoritative, corp) ────────────────────────────────────
   "claude-opus-4.6":    P(5,    25,  0.50, 6.25,  false, "Claude Opus 4.6", true),
   "claude-opus-4.5":    P(5,    25,  0.50, 6.25,  false, "Claude Opus 4.5", true),
@@ -65,11 +120,12 @@ export const PRICING = {
  * request (see report.loadPricing). The user can edit, add and remove
  * entries from the Pricing tab of the dashboard.
  */
-let runtimeTable = (() => { const t = {}; for (const [id, c] of Object.entries(PRICING)) t[id] = c; return t; })();
-let runtimeReference = null;
+let runtimeTable: Record<string, RateCard> = (() => { const t: Record<string, RateCard> = {}; for (const [id, c] of Object.entries(PRICING)) t[id] = c; return t; })();
+let runtimeReference: string | null = null;
+let runtimeBaseline: string | null = null;
 
 /** Built-in table as a plain array (the seed for the user's editable file). */
-export function builtinEntries() {
+export function builtinEntries(): PricingEntry[] {
   return Object.entries(PRICING).map(([id, c]) => ({
     id,
     label: c.label || id,
@@ -81,8 +137,8 @@ export function builtinEntries() {
 }
 
 /** Install a user table (array of {id, label, input, output, cacheRead, cacheWrite, estimated, local, corp}) as the effective rate cards. */
-export function setRuntimeTable(entries, referenceModel) {
-  const t = {};
+export function setRuntimeTable(entries: PricingEntry[] | null | undefined, referenceModel?: string | null, baselineModel?: string | null): void {
+  const t: Record<string, RateCard> = {};
   for (const e of entries || []) {
     if (!e || typeof e.id !== "string" || !e.id.trim()) continue;
     const id = e.id.trim().toLowerCase();
@@ -99,21 +155,25 @@ export function setRuntimeTable(entries, referenceModel) {
   }
   runtimeTable = t;
   runtimeReference = (typeof referenceModel === "string" && referenceModel.trim()) ? referenceModel.trim().toLowerCase() : null;
+  runtimeBaseline = (typeof baselineModel === "string" && baselineModel.trim()) ? baselineModel.trim().toLowerCase() : null;
 }
 
 /** Current effective table as an array (for GET /pricing). */
-export function runtimeEntries() {
+export function runtimeEntries(): (RateCard & { id: string })[] {
   return Object.entries(runtimeTable).map(([id, c]) => ({ id, ...c }));
 }
 
 /** The model the WFH (local) compute is valued against. */
-export function referenceModelId() { return runtimeReference; }
+export function referenceModelId(): string | null { return runtimeReference; }
+
+/** The user-chosen local baseline model (the home-lab card the comparison is priced against). */
+export function baselineModelId(): string | null { return runtimeBaseline; }
 
 /** Marker: anything that looks like a self-hosted / free model prices at $0. */
 const LOCAL_RE = /llama|gemma|mistral|phi-?3|gpt-?oss|mlx|gguf|ollama|lm-?studio|lmstudio|vllm|4bit|8bit|16bit|int8|fp8|local|blobs\/sha256/;
 
 /** Strip provider prefixes + lowercase, so "anthropic.claude-sonnet-4-6" -> "claude-sonnet-4-6". */
-export function normalizeModel(name) {
+export function normalizeModel(name: unknown): string {
   if (!name) return "";
   let s = String(name).toLowerCase().trim();
   s = s.replace(/^(eu\.|us\.|us-east-1\.|us-west-2\.)?anthropic\./, "");
@@ -131,7 +191,7 @@ export function normalizeModel(name) {
  * Resolve a rate card for a model name.
  * Order: exact (raw) -> exact (normalized) -> local/free marker -> family fallback -> null.
  */
-export function priceFor(model) {
+export function priceFor(model: unknown): RateCard | null {
   if (!model) return null;
   const raw = String(model).toLowerCase();
   if (runtimeTable[raw]) return runtimeTable[raw];
@@ -154,7 +214,7 @@ export function priceFor(model) {
 }
 
 /** Break down the USD cost of a bucket set under a rate card. Local (home-lab) cards price at their configured rates (set in the Pricing tab) so you can track what your local compute "costs". */
-export function costBreakdown(buckets, card) {
+export function costBreakdown(buckets: BucketsLike | null | undefined, card: RateCard | null): CostBreakdown {
   if (!card) return { inputCost: 0, outputCost: 0, cacheReadCost: 0, cacheWriteCost: 0, total: 0 };
   const b = buckets || {};
   const inputCost    = ((b.uncachedInputTokens || 0) / 1e6) * card.input;
@@ -168,15 +228,15 @@ export function costBreakdown(buckets, card) {
 }
 
 /** Total USD cost of a bucket set under a rate card. */
-export function costFor(buckets, card) {
+export function costFor(buckets: BucketsLike | null | undefined, card: RateCard | null): number {
   return costBreakdown(buckets, card).total;
 }
 
-export function emptyBuckets() {
+export function emptyBuckets(): TokenBuckets {
   return { uncachedInputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
 }
 
-export function allTokens(buckets) {
+export function allTokens(buckets: BucketsLike | null | undefined): number {
   const b = buckets || {};
   return (b.uncachedInputTokens || 0) + (b.outputTokens || 0) + (b.cacheReadTokens || 0) + (b.cacheWriteTokens || 0);
 }
@@ -193,18 +253,18 @@ export function allTokens(buckets) {
 export const LOCAL_QWEN_KEY = "qwen3.8-local";
 
 /** True when the provider is a paid Copilot provider. */
-export function isCopilotProvider(provider) {
+export function isCopilotProvider(provider: string | null | undefined): boolean {
   return /copilot/i.test(String(provider || ""));
 }
 
 /** True when the provider is a direct (paid, non-Copilot) API provider, e.g. the DeepSeek API. */
 const API_PROVIDER_RE = /deepseek/i;
-export function isApiProvider(provider) {
+export function isApiProvider(provider: string | null | undefined): boolean {
   return API_PROVIDER_RE.test(String(provider || ""));
 }
 
 /** The table key (id) that exactly matches a model name, if any (raw -> normalized -> dotted). */
-function lookupKey(name) {
+function lookupKey(name: unknown): string | null {
   if (!name) return null;
   const raw = String(name).toLowerCase();
   if (runtimeTable[raw]) return raw;
@@ -224,14 +284,14 @@ function lookupKey(name) {
  * The per-model rate is still resolved family-wise by priceFor (Qwen -> the metered
  * qwen3.8-local card, other self-hosted -> the local-free card).
  */
-export function modelKey(provider, model) {
+export function modelKey(provider: string | null | undefined, model: string | null | undefined): string {
   const key = lookupKey(model);
   if (key) return key;
   return normalizeModel(model) || "unknown";
 }
 
 /** Billing kind for a real usage point: "local" (home lab, $0) or "corp" (billed). */
-export function kindFor(provider, model) {
+export function kindFor(provider: string | null | undefined, model: string | null | undefined): "local" | "corp" {
   const card = priceFor(modelKey(provider, model));
   if (card) return card.local ? "local" : "corp";
   // No rate card resolves (an unrecognizable local model): classify by provider so a
@@ -240,7 +300,7 @@ export function kindFor(provider, model) {
 }
 
 /** Rate card for a real (provider, model) usage point. */
-export function priceForProvider(provider, model) {
+export function priceForProvider(provider: string | null | undefined, model: string | null | undefined): RateCard | null {
   return priceFor(modelKey(provider, model));
 }
 
@@ -254,8 +314,8 @@ const LOCAL_MODEL_RE = /qwen|llama|gemma|mistral|phi-?3|gpt-?oss|mlx|gguf|ollama
 const LOCAL_PROVIDER_RE = /llama|ollama|vllm|transformers|mlx|lm-?studio|lmstudio|ninfer|fast-qwen|v-llm|sss|ddd|local/i;
 
 /** Build the initial table from the models actually seen in the trajectory: [{ id, label, provider }]. */
-export function seedEntries(discovered = []) {
-  const out = [];
+export function seedEntries(discovered: DiscoveredModel[] = []): PricingEntry[] {
+  const out: PricingEntry[] = [];
   const seen = new Set();
   for (const d of discovered) {
     if (!d || !d.id) continue;

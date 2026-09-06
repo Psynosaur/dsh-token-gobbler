@@ -1,6 +1,9 @@
 // token-gobbler · client/table.tsx
-// Generic data table (paging, grouping, expandable drawers). Used by the
-// activity tabs. (The old ASCII `CliTree` was removed — the Tokens drawer now
+// THE generic data table: paging, grouping, expandable drawers, sticky header,
+// all table CSS (token-gobbler.css `.tg-table*` / `.tg-pager` / `.tg-drawer-*`).
+// Every table in the activity tabs renders through this — the per-session
+// column sets live in client/session-table.tsx, the aggregation math in
+// client/agg.ts. (The old ASCII `CliTree` was removed — the Tokens drawer now
 // uses a standard collapsible turn table in drawers.tsx.)
 // React is an ambient global injected by the factory (client/index.ts). We
 // reach hooks via React.* at call time (render), never at module load, so no
@@ -18,7 +21,7 @@ export const groupRows = (rows: any[], groupBy?: (r: any) => string): { label: s
   return out;
 };
 
-interface Column {
+export interface Column {
   key: string;
   label: string;
   align?: "l" | "r";
@@ -27,7 +30,7 @@ interface Column {
   fallback?: any;
 }
 
-interface TgTableOpts {
+export interface TgTableOpts {
   columns: Column[];
   rows: any[];
   rowKey: (r: any) => string;
@@ -40,10 +43,12 @@ interface TgTableOpts {
   groupBy?: (r: any) => string;
   empty?: any;
   compact?: boolean;
+  /** Extra CSS class for a row (e.g. dimming archived sessions). */
+  rowClass?: (r: any) => string;
 }
 
 export const TgTable = (opts: TgTableOpts) => {
-  const { columns, rows, rowKey, expandedId, onToggle, drawer, page = 0, setPage, pageSize = 0, groupBy, empty, compact } = opts;
+  const { columns, rows, rowKey, expandedId, onToggle, drawer, page = 0, setPage, pageSize = 0, groupBy, empty, compact, rowClass } = opts;
   const hasDrawer = !!drawer;
   if (!rows || !rows.length) return empty || jsx("div", { className: "tg-muted", style: { fontSize: 13, padding: "8px 4px" }, children: "No data." });
   const total = rows.length;
@@ -56,7 +61,7 @@ export const TgTable = (opts: TgTableOpts) => {
     const key = rowKey(r);
     const open = hasDrawer && expandedId === key;
     const rowEl = jsxs("tr", {
-      className: "tg-tr" + (hasDrawer ? " tg-row-btn" : "") + (compact ? " tg-compact" : ""),
+      className: "tg-tr" + (hasDrawer ? " tg-row-btn" : "") + (compact ? " tg-compact" : "") + (rowClass && rowClass(r) ? " " + rowClass(r) : ""),
       onClick: hasDrawer ? () => { if (onToggle) onToggle(open ? null : key); } : undefined,
       style: open ? { background: "rgba(251,191,36,0.05)" } : undefined,
       children: [
@@ -69,7 +74,7 @@ export const TgTable = (opts: TgTableOpts) => {
       ],
     }, key);
     if (!open) return [rowEl];
-    return [rowEl, jsx("tr", { className: "tg-drawer-row", children: jsx("td", { colSpan, style: { padding: 0, borderBottom: "1px solid rgba(255,255,255,0.08)", minWidth: 0, width: "100%", boxSizing: "border-box" }, children: drawer!(r) }) }, key + "-drawer")];
+    return [rowEl, jsx("tr", { className: "tg-drawer-row", children: jsx("td", { className: "tg-drawer-cell", colSpan, children: drawer!(r) }) }, key + "-drawer")];
   };
   return jsxs("div", { className: "tg-tscroll", children: [
     jsxs("table", { className: "tg-table tg-sticky", style: hasDrawer ? { tableLayout: "fixed", width: "100%" } : undefined, children: [
@@ -77,7 +82,7 @@ export const TgTable = (opts: TgTableOpts) => {
       ...groups.flatMap((g) => g.label ? [jsx("tr", { className: "tg-group", children: jsx("td", { colSpan, children: g.label }) }, g.label + "-g")] : []),
       ...pageRows.flatMap(renderRow),
     ]}),
-    pageSize > 0 && totalPages > 1 ? jsxs("div", { className: "tg-pager", style: { display: "flex", alignItems: "center", gap: 10, padding: "8px 4px" }, children: [
+    pageSize > 0 && totalPages > 1 ? jsxs("div", { className: "tg-pager", children: [
       jsx("button", { className: "tg-ghost", disabled: safePage <= 0, onClick: () => setPage && setPage(safePage - 1), children: "‹ Prev" }),
       jsx("span", { className: "tg-faint", style: { fontSize: 12 }, children: (safePage + 1) + " / " + totalPages + " · " + total + " rows" }),
       jsx("button", { className: "tg-ghost", disabled: safePage >= totalPages - 1, onClick: () => setPage && setPage(safePage + 1), children: "Next ›" }),

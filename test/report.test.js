@@ -10,7 +10,7 @@ import { priceFor, costFor, costBreakdown, modelKey, priceForProvider, isCopilot
 import { attributeSession } from "../lib/report.js";
 import { parseTrajectoryText, readTrajectory, parseStatsSnapshot } from "../lib/trajectory.js";
 import { readProjcache } from "../lib/projcache.js";
-import { buildReport, priceTotals, buildBreakdown, buildPerformance, addSavings, resolvePaths, loadPricing, savePricing, pricingFilePath, reprocessTrajectories, discoverLocalModels } from "../lib/report.js";
+import { buildReport, priceTotals, buildBreakdown, buildPerformance, addSavings, resolvePaths, loadPricing, savePricing, pricingFilePath, reprocessTrajectories, discoverLocalModels, discoverModelCards } from "../lib/report.js";
 import { builtinEntries, setRuntimeTable } from "../lib/pricing.js";
 
 // ── pricing ──────────────────────────────────────────────────────────────
@@ -197,6 +197,7 @@ test("parseTrajectoryText: event categories + tool names", () => {
   assert.equal(r.events.userMessages, 1);
   assert.equal(r.events.assistantMessages, 1);
   assert.equal(r.events.turns, 1);
+  assert.equal(r.events.userStops, 0); // turn/end without aborted-by-user reason
   assert.equal(r.events.compactions, 1);
   assert.equal(r.events.retries, 1);
   assert.equal(r.events.approvals, 1);
@@ -205,6 +206,20 @@ test("parseTrajectoryText: event categories + tool names", () => {
   assert.equal(r.tools.bash, 2);
   assert.equal(r.tools.read, 1);
   assert.equal(r.tools.run_code, undefined); // tool/call names are not counted in tools
+});
+
+test("parseTrajectoryText: user stop = turn/end aborted by user", () => {
+  const lines = [
+    { type: "session", id: "s1", cwd: "/x" },
+    { type: "turn/end", seq: 1, data: { turn: 1, reason: { kind: "aborted", reason: { kind: "user" } } } }, // USER STOP
+    { type: "turn/end", seq: 2, data: { turn: 2, reason: { kind: "completed" } } }, // normal end
+    { type: "turn/end", seq: 3, data: { turn: 3, reason: { kind: "aborted", reason: { kind: "parent" } } } }, // NOT user-initiated
+    { type: "turn/end", seq: 4, data: { turn: 4, reason: { kind: "aborted", reason: { kind: "user" } } } }, // USER STOP
+    { type: "turn/end", seq: 5, data: { turn: 5, reason: { kind: "interrupted" } } }, // crash-orphan marker, not a stop
+  ].map((l) => JSON.stringify(l)).join("\n");
+  const r = parseTrajectoryText(lines);
+  assert.equal(r.events.turns, 5); // every turn/end still counts as a turn
+  assert.equal(r.events.userStops, 2); // only the two aborted-by-user turns
 });
 
 test("buildBreakdown: aggregate + per-session events/tools", () => {
@@ -985,5 +1000,83 @@ test("discoverLocalModels: distinct local models from trajectories, not folded i
   assert.equal(out.every((m) => m.provider === "llamaserver"), true);
   // the copilot/claude model is NOT a local model -> excluded
   assert.ok(!ids.includes("claude-sonnet-4.6"));
+});
+
+test("discoverModelCards: ALL provider/model pairs (local + corp) with kind + resolved cards", () => {
+  const home = mkdtempSync(join(tmpdir(), "tg-disc2-"));
+  const ws = join(home, "sessions", "--tmp--", "s-disc2");
+  mkdirSync(ws, { recursive: true });
+  const traj = [
+    { type: "session", id: "s-disc2", cwd: "/x" },
+    { type: "request/header", seq: 0, data: { header: { config: { provider: "llamaserver", model: "Qwen3.8-27B-Q6-GGUF" } } } },
+    { type: "request/header", seq: 1, data: { header: { config: { provider: "github-copilot-official", model: "claude-sonnet-4.6" } } } },
+    { type: "request/header", seq: 2, data: { header: { config: { provider: "deepseek-official", model: "deepseek-v4-flash" } } } },
+  ].map((l) => JSON.stringify(l)).join("\n");
+  writeFileSync(join(ws, "session.jsonl.zstd"), zstdCompressSync(Buffer.from(traj, "utf8")));
+  const out = discoverModelCards(home);
+  const byId = new Map(out.map((m) => [m.id, m]));
+  // local qwen variant: local kind, family-resolved card (metered qwen -> 0 input from seeding)
+  const qwen = byId.get("qwen3.8-27b-q6-gguf");
+  assert.ok(qwen);
+  assert.equal(qwen.local, true);
+  assert.equal(qwen.corp, false);
+  assert.ok(Number.isFinite(qwen.input));
+  // copilot claude: corp, known card
+  const claude = byId.get("claude-sonnet-4.6");
+  assert.ok(claude);
+  assert.equal(claude.local, false);
+  assert.equal(claude.corp, true);
+  assert.equal(claude.input, 3);
+  assert.equal(claude.estimated, false);
+  // deepseek API: corp, api card
+  const ds = byId.get("deepseek-v4-flash");
+  assert.ok(ds);
+  assert.equal(ds.corp, true);
+  assert.equal(ds.input, 0.44);
+});
+
+test("savePricing/loadPricing: baselineModel round-trip + drives the comparison baseline", () => {
+  const home = mkdtempSync(join(tmpdir(), "tg-base-"));
+  mkdirSync(join(home, "storages"), { recursive: true });
+  const ws = join(home, "sessions", "--tmp--", "s-base");
+  mkdirSync(ws, { recursive: true });
+  writeFileSync(join(home, "storages", "session_projcache.json"), JSON.stringify({ tables: { sessions: {
+    "s-base": { identity: { createdAt: 100, cwd: "/a" }, rows: { tokenUsage: { val: { totals: { uncachedInputTokens: 1_000_000, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 } } } } },
+  }}}));
+  const traj = [
+    { type: "session", id: "s-base", cwd: "/a" },
+    { type: "request/context", data: { provider: "llamaserver", model: "Qwen3.8-27B-Q4-GGUF" } },
+    { type: "assistant/chunk", data: { turn: 1, step: 1, chunk: { type: "usage", usage: { inputTokens: 1_000_000 } } } },
+  ].map((l) => JSON.stringify(l)).join("\n");
+  writeFileSync(join(ws, "session.jsonl.zstd"), zstdCompressSync(Buffer.from(traj, "utf8")));
+
+  // Two local rows: q6 first (implied default baseline), q4 second -> user picks q4.
+  const models = [
+    { id: "qwen3.8-27b-q6-gguf", label: "Q6", input: 0.25, output: 2.5, cacheRead: 0.05, cacheWrite: 0.31, estimated: false, local: true, corp: false, provider: "llamaserver" },
+    { id: "qwen3.8-27b-q4-gguf", label: "Q4", input: 0.25, output: 2.5, cacheRead: 0.05, cacheWrite: 0.31, estimated: false, local: true, corp: false, provider: "llamaserver" },
+    ...builtinEntries().filter((m) => !m.local),
+  ];
+  const saved = savePricing(home, { referenceModel: "claude-opus-4.6", baselineModel: "qwen3.8-27b-q4-gguf", models });
+  assert.equal(saved.baselineModel, "qwen3.8-27b-q4-gguf");
+
+  // The saved baseline drives the comparison: baselineId = q4, comparison[0] = q4 row.
+  const rep = buildReport({ dshHome: home });
+  assert.equal(rep.savings.baselineId, "qwen3.8-27b-q4-gguf");
+  assert.equal(rep.comparison[0].id, "qwen3.8-27b-q4-gguf");
+  assert.equal(rep.comparison[0].baseline, true);
+
+  // Re-load: baselineModel comes back from the file.
+  const p = loadPricing(home);
+  assert.equal(p.baselineModel, "qwen3.8-27b-q4-gguf");
+  assert.equal(p.fromFile, true);
+
+  // Removing the baseline row falls back to the next local row.
+  const withoutQ4 = saved.models.filter((m) => m.id !== "qwen3.8-27b-q4-gguf");
+  const saved2 = savePricing(home, { referenceModel: "claude-opus-4.6", baselineModel: null, models: withoutQ4 });
+  assert.equal(saved2.baselineModel, "qwen3.8-27b-q6-gguf");
+
+  // invalid baseline (not local / not in table) is rejected
+  assert.throws(() => savePricing(home, { referenceModel: "claude-opus-4.6", baselineModel: "claude-opus-4.6", models }), /baselineModel must be a local model/);
+  assert.throws(() => savePricing(home, { referenceModel: "claude-opus-4.6", baselineModel: "nope", models }), /baselineModel must be one of/);
 });
 

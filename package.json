@@ -44,14 +44,18 @@
     "node": ">=24"
   },
   "scripts": {
-    "test": "node --test test/*.test.js",
+    "test": "npm run build:lib && node --test test/*.test.js",
     "usage": "node bin/token-gobbler.js",
     "usage:json": "node bin/token-gobbler.js --json",
+    "build": "npm run build:lib && npm run build:client",
+    "build:lib": "tsc -p tsconfig.build.json",
     "build:client": "esbuild client/index.ts --bundle --format=iife --target=es2022 --platform=browser --external:react --external:react/jsx-runtime --loader:.css=text --outfile=lib/client.js",
     "watch:client": "esbuild client/index.ts --bundle --format=iife --target=es2022 --platform=browser --external:react --external:react/jsx-runtime --loader:.css=text --outfile=lib/client.js --watch",
+    "typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.client.json",
     "typecheck:client": "tsc -p tsconfig.client.json"
   },
   "devDependencies": {
+    "@types/node": "^26.4.1",
     "esbuild": "^0.28.2",
     "typescript": "^7.0.2"
   }

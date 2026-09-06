@@ -64,12 +64,94 @@ export const EVENT_META = [
   { key: "userMessages", label: "Your messages", color: "#34d399" },
   { key: "assistantMessages", label: "Assistant msgs", color: "#2dd4bf" },
   { key: "turns", label: "Turns", color: "#fbbf24" },
+  { key: "userStops", label: "User stops", color: "#f87171" },
   { key: "compactions", label: "Compactions", color: "#f472b6" },
   { key: "retries", label: "LLM retries", color: "#fb923c" },
   { key: "approvals", label: "Approvals", color: "#f87171" },
   { key: "todos", label: "Todo writes", color: "#a3e635" },
   { key: "commands", label: "Commands", color: "#38bdf8" },
 ];
+
+// ── localStorage point cache ─────────────────────────────────────────────
+// The /breakdown payload (the per-step points: ctx size, prefill/decode
+// speed, compaction events) is the expensive part of a load — the server
+// re-derives it from the trajectories on every call. Once computed, the
+// points only change when the trajectories change, so the computed payloads
+// are cached in localStorage (gzip via CompressionStream, base64-encoded)
+// and served from the cache while a fingerprint — derived from the cheap
+// /usage aggregates — is unchanged. While the fingerprint matches, the heavy
+// endpoints are skipped entirely: no server-side recompute, instant modal.
+export type TgCache = { v: 1; home: string; fp: string; at: number; usage: any; breakdown: any; perf: any };
+// Bump CACHE_VERSION whenever the per-step point COMPUTATION changes (parser or
+// report math) — the fingerprint only covers trajectory growth, so a changed
+// computation would otherwise keep serving stale cached points. The ♻ Reprocess
+// button also clears the cache explicitly.
+const CACHE_VERSION = 3; // v3: EventCounts now includes userStops (turn/end aborted-by-user); cached breakdown chips would otherwise stay 0
+const CACHE_KEY = "tg:cache:v" + CACHE_VERSION;
+const PREV_KEYS = ["tg:cache:v1", "tg:cache:v2"]; // superseded cache keys — removed so they stop eating quota
+const b64FromBytes = (bytes: Uint8Array): string => {
+  let bin = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, Array.from(bytes.subarray(i, i + 0x8000)));
+  return btoa(bin);
+};
+const bytesFromB64 = (b64: string): Uint8Array => {
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+};
+/** Serialize + gzip → "gz:<base64>". Falls back to "raw:<json>" when
+ *  CompressionStream is unavailable (only for payloads that fit). */
+export async function compressPayload(obj: unknown): Promise<string> {
+  const json = JSON.stringify(obj);
+  const CS = (globalThis as any).CompressionStream;
+  if (typeof CS !== "function") return json.length < 4_500_000 ? "raw:" + json : "";
+  try {
+    const stream = new Blob([json]).stream().pipeThrough(new CS("gzip"));
+    const buf = await new Response(stream).arrayBuffer();
+    return "gz:" + b64FromBytes(new Uint8Array(buf));
+  } catch {
+    return json.length < 4_500_000 ? "raw:" + json : "";
+  }
+}
+export async function decompressPayload(s: string): Promise<any> {
+  if (s.startsWith("raw:")) return JSON.parse(s.slice(4));
+  const DS = (globalThis as any).DecompressionStream;
+  if (typeof DS !== "function") throw new Error("unsupported cache format");
+  const raw = bytesFromB64(s.slice(3)); // buffer is exactly the byte run (fresh allocation)
+  const stream = new Blob([raw.buffer as ArrayBuffer]).stream().pipeThrough(new DS("gzip"));
+  return JSON.parse(await new Response(stream).text());
+}
+export async function readCache(): Promise<TgCache | null> {
+  try {
+    const s = localStorage.getItem(CACHE_KEY);
+    if (!s) return null;
+    const c = await decompressPayload(s);
+    return c && c.v === 1 ? c : null;
+  } catch {
+    return null;
+  }
+}
+/** Drop superseded cache keys so an old version stops eating localStorage quota. */
+const dropPrevKeys = (): void => {
+  try { for (const k of PREV_KEYS) localStorage.removeItem(k); } catch { /* ignore */ }
+};
+/** Store the cache; on quota overflow retry without the big breakdown, then give up silently. */
+export async function writeCache(c: TgCache): Promise<void> {
+  for (const a of [c, { ...c, breakdown: null }]) {
+    try {
+      const body = await compressPayload(a);
+      if (!body) return;
+      localStorage.setItem(CACHE_KEY, body);
+      dropPrevKeys();
+      return;
+    } catch { /* try next attempt */ }
+  }
+}
+export function clearCache(): void {
+  try { localStorage.removeItem(CACHE_KEY); } catch { /* ignore */ }
+  dropPrevKeys();
+}
 
 // ── scoped CSS (dedicated file for easy editing) ──────────────────────────
 import cssText from "./token-gobbler.css";
@@ -108,6 +190,11 @@ export const eventChips = (events: any): any => {
     ],
   }, m.key)) });
 };
+
+/** Auto-fit grid of costCards — the shared "badges" row used by the Cost,
+ *  Combined and Daily tabs (`.tg-badgegrid` in token-gobbler.css). */
+export const badgeGrid = (items: any[]): any =>
+  jsx("div", { className: "tg-badgegrid", children: items });
 
 export const toolTable = (tools: any[], sticky: boolean): any => {
   if (!tools || !tools.length) return jsx("div", { className: "tg-muted", style: { fontSize: 13, padding: "8px 4px" }, children: "No tool invocations recorded." });

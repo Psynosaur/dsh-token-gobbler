@@ -43,7 +43,12 @@
 .tg-tr{transition:background .12s ease}
 .tg-tr:hover{background:rgba(255,255,255,0.03)}
 .tg-tr:last-child .tg-td{border-bottom:none}
+.tg-tr.tg-total td{border-top:2px solid rgba(251,191,36,0.3);background:rgba(251,191,36,0.05)}
+.tg-tr.tg-total:hover td{background:rgba(251,191,36,0.08)}
 .tg-kind{font-size:12px;font-weight:600}
+/* Archived sessions (archived in the DSH GUI): dimmed row + 📦 marker in the title. */
+.tg-tr.tg-archived .tg-td{opacity:0.5}
+.tg-archived-badge{font-size:10px;margin-right:2px;filter:grayscale(0.4)}
 
 /* ── scroll containers ─────────────────────────────────────────────────── */
 .tg-scroll{overflow-x:auto}
@@ -73,7 +78,7 @@
 /* ── modal ─────────────────────────────────────────────────────────────── */
 .tg-modal-overlay{position:fixed;inset:0;z-index:2;display:flex;align-items:center;justify-content:center}
 .tg-modal-mask{position:absolute;inset:0;background:rgba(2,6,12,0.62);backdrop-filter:blur(3px)}
-.tg-modal-panel{position:relative;z-index:1;width:min(1180px,calc(100vw - 48px));height:min(860px,calc(100vh - 48px));background:linear-gradient(180deg,#0e1626,#0b111d);border:1px solid rgba(255,255,255,0.1);border-radius:20px;box-shadow:0 24px 80px rgba(0,0,0,0.6);display:flex;flex-direction:column;overflow:hidden;color:#e5e7eb}
+.tg-modal-panel{position:relative;z-index:1;width:min(2360px,calc(100vw - 48px));height:min(1720px,calc(100vh - 48px));background:linear-gradient(180deg,#0e1626,#0b111d);border:1px solid rgba(255,255,255,0.1);border-radius:20px;box-shadow:0 24px 80px rgba(0,0,0,0.6);display:flex;flex-direction:column;overflow:hidden;color:#e5e7eb}
 .tg-modal-header{flex:none;display:flex;justify-content:space-between;align-items:flex-start;gap:12px;padding:18px 20px 14px;border-bottom:1px solid rgba(255,255,255,0.07)}
 .tg-close{cursor:pointer;width:30px;height:30px;border-radius:50%;border:1px solid rgba(255,255,255,0.14);background:rgba(255,255,255,0.04);color:#cbd5e1;font-size:14px;display:flex;align-items:center;justify-content:center;transition:background .15s ease,border-color .15s ease,color .15s ease}
 .tg-close:hover{background:rgba(248,113,113,0.18);border-color:rgba(248,113,113,0.4);color:#fca5a5}
@@ -82,7 +87,10 @@
 .tg-modal-body::-webkit-scrollbar-thumb{background:rgba(255,255,255,0.12);border-radius:5px}
 
 /* ── chips ─────────────────────────────────────────────────────────────── */
-.tg-chipgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px}
+/* auto-FIT (not auto-fill): with the doubled modal width, unused tracks collapse
+   so the actual chips/cards stretch to fill the whole row instead of leaving a
+   dead column of empty space on the right. */
+.tg-chipgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px}
 .tg-chip{display:flex;align-items:center;gap:8px;padding:11px 13px;background:linear-gradient(180deg,rgba(255,255,255,0.04),rgba(255,255,255,0.015));border:1px solid rgba(255,255,255,0.08);border-radius:12px}
 .tg-chip-label{font-size:12px;color:#94a3b8;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .tg-chip-value{font-size:16px;font-weight:700;color:#f1f5f9}
@@ -93,6 +101,47 @@
 .tg-chev{display:inline-block;width:14px;font-size:10px;color:#64748b;transition:transform .15s ease}
 .tg-chev.open{transform:rotate(90deg);color:#fbbf24}
 
+/* ── TgTable pager + drawer cell ───────────────────────────────────────── */
+.tg-pager{display:flex;align-items:center;gap:10px;padding:8px 4px}
+.tg-drawer-cell{padding:0;border-bottom:1px solid rgba(255,255,255,0.08);min-width:0;width:100%;box-sizing:border-box}
+
+/* ── badge grid (shared costCard row: Cost / Combined / Daily tabs) ────── */
+.tg-badgegrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px}
+
+/* active state for ghost buttons (the heatmap range switchers) — matches the
+   segmented control's active look */
+.tg-ghost.active{background:rgba(251,191,36,0.16);border-color:rgba(251,191,36,0.45);color:#fde68a}
+
+/* ── Daily tab: calendar heatmap ───────────────────────────────────────── */
+.tg-day{display:flex;flex-direction:column;gap:20px}
+.tg-day-ov{display:flex;flex-direction:column;gap:18px;scroll-margin-top:8px}
+.tg-day-ov-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.tg-heat-head{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap;margin-bottom:10px}
+.tg-heat-ranges{display:flex;gap:6px;align-items:center}
+.tg-heat-scroll{position:relative;overflow-x:auto;border-radius:10px}
+.tg-heat-months{margin-bottom:4px;min-height:14px}
+.tg-heat-month{font-size:10px;color:#64748b;font-weight:600;white-space:nowrap;overflow:visible}
+/* 1fr columns + 1fr rows so the grid spans the full modal width; the dynamic
+   part (min-width floor, the months' repeat(weeks,1fr) template) stays inline */
+.tg-heat-cells{width:100%;height:280px;display:grid;grid-auto-flow:column;grid-auto-columns:1fr;grid-template-rows:repeat(7,1fr);column-gap:4px;row-gap:4px}
+.tg-heat-cell{border-radius:4px;outline-offset:1px}
+.tg-heat-cell.clickable{cursor:pointer}
+.tg-heat-cell.out{opacity:0.35}
+.tg-heat-cell.today{outline:1.5px solid rgba(248,250,252,0.75)}
+.tg-heat-cell.selected{outline:1.5px solid #fbbf24}
+.tg-heat-legend{display:flex;justify-content:flex-end;align-items:center;gap:4px;margin-top:4px}
+.tg-heat-sw{width:11px;height:11px;border-radius:3px;display:inline-block}
+
+/* fixed-position day tooltip — rendered as a sibling of the scroll wrapper;
+   position:fixed anchors it to the cursor so NOTHING can clip it */
+.tg-tip{position:fixed;z-index:60;pointer-events:none;width:280px;background:#0d1524;border:1px solid rgba(255,255,255,0.14);border-radius:10px;box-shadow:0 10px 30px rgba(0,0,0,0.5);padding:10px 12px;font-size:11.5px}
+.tg-tip-date{font-weight:700;color:#f1f5f9;font-size:12px}
+.tg-tip-sub{color:#94a3b8;margin-top:2px;font-size:11px}
+.tg-tip-grid{display:grid;grid-template-columns:1fr 1fr;gap:3px 10px;margin-top:7px}
+.tg-tip-k{color:#64748b}
+.tg-tip-total{color:#fbbf24}
+.tg-tip-foot{font-size:10px;margin-top:7px}
+
 /* ── drawer ────────────────────────────────────────────────────────────── */
 .tg-drawer-row{background:rgba(255,255,255,0.02)}
 .tg-drawer-inner{padding:16px 18px 18px 42px;display:flex;flex-direction:column;gap:16px;width:100%;min-width:0;max-width:100%;box-sizing:border-box}
@@ -102,10 +151,11 @@
 .tg-scrollable::-webkit-scrollbar-thumb{background:rgba(255,255,255,0.10);border-radius:4px}
 .tg-scrollable::-webkit-scrollbar-track{background:transparent}
 .tg-group td{padding:8px 12px 4px;font-size:11px;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;color:#64748b;border-bottom:1px solid rgba(255,255,255,0.08);background:rgba(255,255,255,0.02);position:sticky;top:0}
-.tg-meta-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:8px}
-.tg-meta{background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.06);border-radius:9px;padding:8px 10px;min-width:0}
-.tg-meta-k{font-size:10px;font-weight:600;letter-spacing:0.05em;text-transform:uppercase;color:#64748b}
-.tg-meta-v{font-size:12.5px;color:#e5e7eb;margin-top:3px;word-break:break-word}
+/* meta cards stretch to fill the drawer width (auto-fit collapses empty tracks) */
+.tg-meta-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px}
+.tg-meta{background:rgba(255,255,255,0.035);border:1px solid rgba(255,255,255,0.07);border-radius:10px;padding:10px 13px;min-width:0}
+.tg-meta-k{font-size:10.5px;font-weight:600;letter-spacing:0.05em;text-transform:uppercase;color:#64748b}
+.tg-meta-v{font-size:13.5px;color:#e5e7eb;margin-top:4px;word-break:break-word}
 .tg-drawer-sec{font-size:11px;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;color:#94a3b8;margin-bottom:8px}
 .tg-drawer-sub{font-size:11px;font-weight:600;color:#64748b;margin-bottom:6px}
 .tg-turn{border-left:2px solid rgba(251,191,36,0.45);padding:6px 12px;margin-bottom:8px;background:rgba(255,255,255,0.02);border-radius:0 8px 8px 0}
@@ -164,6 +214,22 @@
 .tg-turn-chip{font-size:11px;font-weight:600;padding:3px 9px;border-radius:999px;border:1px solid rgba(255,255,255,0.12);background:rgba(255,255,255,0.04);color:#94a3b8;cursor:pointer;white-space:nowrap;transition:background .12s ease,color .12s ease,border-color .12s ease}
 .tg-turn-chip:hover{background:rgba(255,255,255,0.1);color:#e5e7eb}
 .tg-turn-chip.active{background:rgba(251,191,36,0.16);color:#fde68a;border-color:rgba(251,191,36,0.4)}
+/* legend chips — one per series group (context window); click to hide/show it.
+   Swatch = the window's paired lines: solid (decode) over dotted (prefill). */
+.tg-legend-chip{display:inline-flex;align-items:center;gap:7px;font-size:11px;font-weight:600;padding:3px 10px;border-radius:999px;border:1px solid rgba(255,255,255,0.12);background:rgba(255,255,255,0.04);color:#cbd5e1;cursor:pointer;white-space:nowrap;transition:background .12s ease,opacity .12s ease}
+.tg-legend-chip:hover{background:rgba(255,255,255,0.1)}
+.tg-legend-chip .sw{display:inline-flex;flex-direction:column;gap:3px;width:16px;flex:none}
+.tg-legend-chip .sw i{display:block;width:100%;height:0;border-top:2px solid #888}
+.tg-legend-chip .sw i.dash{border-top-style:dotted}
+.tg-legend-chip .sw i.dot{width:7px;height:7px;border:0;border-radius:50%;margin:0 auto}
+.tg-legend-chip.off{opacity:0.38}
+.tg-legend-chip.static{cursor:default}
+.tg-legend-chip.static:hover{background:rgba(255,255,255,0.04)}
+.tg-xmin-row{display:flex;align-items:center;gap:8px;justify-content:flex-end;margin:0 0 4px}
+.tg-xmin{width:110px;font-size:11px;padding:2px 6px;border-radius:6px;border:1px solid rgba(255,255,255,0.14);background:rgba(255,255,255,0.05);color:#e2e8f0;outline:none}
+.tg-xmin:focus{border-color:rgba(96,165,250,0.6)}
+.tg-xmin-clear{font-size:13px;line-height:1;padding:1px 5px;border:0;border-radius:6px;background:rgba(255,255,255,0.08);color:#94a3b8;cursor:pointer}
+.tg-xmin-clear:hover{background:rgba(255,255,255,0.16);color:#e2e8f0}
 
 /* ── collapse (reusable) ───────────────────────────────────────────────── */
 .tg-collapse{display:flex;flex-direction:column;gap:8px}
@@ -179,3 +245,50 @@
 .tg-flash-err{color:#f87171;font-size:12.5px;font-weight:600}
 .tg-refrow{display:flex;align-items:center;gap:14px;flex-wrap:wrap;padding:14px 16px}
 .tg-kind-badge{font-size:11px;font-weight:700;padding:3px 10px;border-radius:999px;white-space:nowrap}
+
+/* ── compaction: COMPACTED banner rows (step table) + detail popup ──────── */
+/* the monospace COMPACTED badge (shared by the banner row and the popup header) */
+.tg-comp-badge{display:inline-flex;align-items:center;gap:5px;font-size:10px;font-weight:800;letter-spacing:0.08em;padding:3px 9px;border-radius:6px;background:rgba(251,191,36,0.15);border:1px solid rgba(251,191,36,0.4);color:#fbbf24;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;white-space:nowrap;flex:none}
+/* banner row in the step table — a full-width clickable strip between turns */
+.tg-comp-row td{background:rgba(251,191,36,0.06);border-top:1px solid rgba(251,191,36,0.28);border-bottom:1px solid rgba(251,191,36,0.28);cursor:pointer;padding:6px 12px}
+.tg-comp-row:hover td{background:rgba(251,191,36,0.13)}
+.tg-comp-row-fail td{background:rgba(248,113,113,0.06);border-color:rgba(248,113,113,0.32)}
+.tg-comp-row-fail:hover td{background:rgba(248,113,113,0.13)}
+.tg-comp-row-fail .tg-comp-badge{background:rgba(248,113,113,0.15);border-color:rgba(248,113,113,0.45);color:#f87171}
+/* running = compaction in progress (start seen, no end yet) — neutral indigo,
+   deliberately NOT red (red is reserved for genuine failures) */
+.tg-comp-row-run td{background:rgba(129,140,248,0.06);border-color:rgba(129,140,248,0.32)}
+.tg-comp-row-run:hover td{background:rgba(129,140,248,0.13)}
+.tg-comp-row-run .tg-comp-badge,.tg-comp-badge-run{background:rgba(129,140,248,0.15);border-color:rgba(129,140,248,0.45);color:#a5b4fc}
+.tg-comp-banner{display:flex;align-items:center;gap:10px;width:100%;min-width:0}
+.tg-comp-row-meta{font-size:11px;color:#94a3b8;margin-left:auto;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+/* the detail popup — a smaller panel than the main modal */
+.tg-comp-panel{width:min(980px,calc(100vw - 48px))!important;height:min(780px,calc(100vh - 48px))!important}
+/* Fixed-height modal: header + meta grid never scroll — only the summary box. */
+.tg-comp-panel .tg-modal-body{display:flex;flex-direction:column;overflow:hidden}
+.tg-comp-body{flex:1;min-height:0;display:flex;flex-direction:column;overflow:hidden}
+.tg-comp-summary-wrap{flex:1;min-height:0;display:flex;flex-direction:column;margin-top:8px}
+.tg-comp-summary{flex:1;min-height:0;word-break:break-word;font-size:12.5px;line-height:1.55;color:#cbd5e1;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);border-radius:10px;padding:12px 14px;overflow-y:auto}
+/* markdown rendering inside the summary box (client/markdown.tsx) */
+.tg-md{font-size:12.5px;line-height:1.55;color:#cbd5e1}
+.tg-md h1{font-size:15px;font-weight:700;color:#e2e8f0;margin:12px 0 6px}
+.tg-md h2{font-size:13.5px;font-weight:700;color:#e2e8f0;margin:12px 0 5px;padding-bottom:4px;border-bottom:1px solid rgba(255,255,255,0.08)}
+.tg-md h3,.tg-md h4,.tg-md h5,.tg-md h6{font-size:12.5px;font-weight:700;color:#e2e8f0;margin:10px 0 4px}
+.tg-md>:first-child{margin-top:0}
+.tg-md p{margin:0 0 8px}
+.tg-md ul,.tg-md ol{margin:0 0 8px;padding-left:20px}
+.tg-md li{margin:2px 0}
+.tg-md li>ul,.tg-md li>ol{margin:2px 0 4px}
+.tg-md code{background:rgba(255,255,255,0.07);border:1px solid rgba(255,255,255,0.09);border-radius:4px;padding:1px 5px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11px;word-break:break-word}
+.tg-md pre{background:rgba(2,6,12,0.55);border:1px solid rgba(255,255,255,0.08);border-radius:8px;padding:10px 12px;margin:0 0 8px;overflow-x:auto}
+.tg-md pre code{background:none;border:none;padding:0;font-size:11px;line-height:1.5;white-space:pre}
+.tg-md blockquote{border-left:3px solid rgba(255,255,255,0.16);padding:2px 0 2px 12px;margin:0 0 8px;color:#94a3b8}
+.tg-md hr{border:none;border-top:1px solid rgba(255,255,255,0.1);margin:10px 0}
+.tg-md a{color:#7dd3fc;text-decoration:underline}
+.tg-md del{color:#64748b}
+.tg-md table{border-collapse:collapse;margin:0 0 8px;font-size:12px}
+.tg-md th,.tg-md td{border:1px solid rgba(255,255,255,0.1);padding:4px 8px;text-align:left}
+.tg-md th{background:rgba(255,255,255,0.05);font-weight:700;color:#e2e8f0}
+.tg-comp-summary::-webkit-scrollbar{width:7px}
+.tg-comp-summary::-webkit-scrollbar-thumb{background:rgba(255,255,255,0.10);border-radius:4px}
+.tg-comp-summary::-webkit-scrollbar-track{background:transparent}

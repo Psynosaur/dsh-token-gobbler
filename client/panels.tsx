@@ -1,7 +1,11 @@
 // token-gobbler · client/panels.tsx
 // Table producers (by-model / by-day / by-session / comparison), the editable
 // pricing tab, and the small cost card used by the cost/performance panels.
+// All tables render through the shared TgTable (client/table.tsx); the
+// per-session column sets live in client/session-table.tsx.
 import { fmt, fmtC, money, fmtMs, thL, thR, tdL, tdR, humanizeModel } from "./core";
+import { TgTable } from "./table";
+import { sessionCostColumns } from "./session-table";
 import { sessionDrawer } from "./drawers";
 
 export const realModelTable = (byModel: any[]) => jsx("div", { className: "tg-tscroll", children: jsxs("table", { className: "tg-table tg-sticky", children: [
@@ -38,6 +42,74 @@ export const perfModelTable = (rows: any[]) => jsx("div", { className: "tg-tscro
     ],
   }, m.model)),
 ]})});
+
+// Cost-by-model breakdown: one row per model carrying the usage buckets (in /
+// out / think / cache), the money cost, and the speed columns (decode, prefill,
+// avg TTFT) — the cost-side counterpart of performance's "Show model table".
+// Ends with a Total row (weighted speeds: totals ÷ total time).
+export const costModelTable = (rows: any[]) => {
+  const R = rows || [];
+  const tot = R.reduce((a: any, m: any) => {
+    a.sessions += m.sessions || 0;
+    a.steps += m.steps || 0;
+    a.in += m.uncachedInputTokens || 0;
+    a.out += m.outputTokens || 0;
+    a.think += m.reasoningTokens || 0;
+    a.cache += m.cacheReadTokens || 0;
+    a.cost += m.cost != null ? m.cost : 0;
+    a.decodeMs += m.decodeMs || 0;
+    a.decodeTokens += m.decodeTokens || 0;
+    a.prefillMs += m.prefillMs || 0;
+    a.prefillTokens += m.prefillTokens || 0;
+    a.prefillSteps += m.prefillSteps || 0;
+    return a;
+  }, { sessions: 0, steps: 0, in: 0, out: 0, think: 0, cache: 0, cost: 0, decodeMs: 0, decodeTokens: 0, prefillMs: 0, prefillTokens: 0, prefillSteps: 0 });
+  const allPriced = R.length > 0 && R.every((m: any) => m.cost != null);
+  const decTps = tot.decodeMs > 0 ? Math.round((tot.decodeTokens / (tot.decodeMs / 1000)) * 10) / 10 : null;
+  const preTps = tot.prefillMs > 0 ? Math.round((tot.prefillTokens / (tot.prefillMs / 1000)) * 10) / 10 : null;
+  const avgTtft = tot.prefillSteps > 0 ? Math.round(tot.prefillMs / tot.prefillSteps) : null;
+  const rt = (tot.decodeMs + tot.prefillMs) > 0 ? (tot.decodeMs + tot.prefillMs) : null;
+  const cstyle: any = { fontWeight: 700, color: "#f8fafc" };
+  return jsx("div", { className: "tg-tscroll", children: jsxs("table", { className: "tg-table tg-sticky", children: [
+    jsx("tr", { children: [
+      thL("Model"), thL("Kind"), thR("Sessions · Steps"), thR("In"), thR("Out"), thR("Think"), thR("Cache"), thR("Cost"), thR("Run time"), thR("Decode"), thR("Prefill"), thR("Avg TTFT"),
+    ] }),
+    ...R.map((m: any) => jsxs("tr", {
+      className: "tg-tr",
+      children: [
+        tdL(m.label, { style: { maxWidth: 210, whiteSpace: "normal", wordBreak: "break-word", fontWeight: 600 }, title: m.label }),
+        tdL(jsx("span", { className: "tg-kind", style: { color: m.kind === "corp" ? "#f87171" : "#34d399" }, children: m.kind === "corp" ? "corp" : "local" })),
+        tdR(m.sessions + " · " + m.steps, { style: { fontWeight: 600 }, title: m.sessions + " session(s) · " + m.steps + " LLM steps" }),
+        tdR(fmtC(m.uncachedInputTokens), { title: fmt(m.uncachedInputTokens) + " new (uncached) input tokens" }),
+        tdR(fmtC(m.outputTokens), { title: fmt(m.outputTokens) + " output tokens" }),
+        tdR(m.reasoningTokens > 0 ? fmtC(m.reasoningTokens) : "—", { title: fmt(m.reasoningTokens) + " reasoning / thinking tokens (a subdivision of Out)" }),
+        tdR(fmtC(m.cacheReadTokens), { title: fmt(m.cacheReadTokens) + " cache read · " + fmt(m.cacheWriteTokens) + " cache write tokens" }),
+        tdR(m.cost != null ? money(m.cost) : "unpriced", { style: { fontWeight: 700, color: m.cost != null ? "#f8fafc" : "#fbbf24" } }),
+        tdR((m.decodeMs || 0) + (m.prefillMs || 0) > 0 ? fmtMs((m.decodeMs || 0) + (m.prefillMs || 0)) : "—", { title: "total runtime = sum of (TTFT + decode) across this model's steps — decode already contains the thinking window" }),
+        tdR(m.tokPerSec != null ? m.tokPerSec + " tok/s" : "—", { style: { fontWeight: 700 }, title: "decode speed — streamed output tokens ÷ decode time (first→last chunk)" }),
+        tdR(m.promptTokPerSec != null ? m.promptTokPerSec + " tok/s" : "—", { style: { fontWeight: 700 }, title: "prefill speed — new (uncached) input tokens ÷ TTFT. TTFT includes network + queue, so this is a lower bound on true prefill rate." }),
+        tdR(m.avgTtftMs != null ? fmtMs(m.avgTtftMs) : "—", { title: "average time from request to first token" }),
+      ],
+    }, m.model)),
+    R.length ? jsx("tr", {
+      className: "tg-tr tg-total",
+      children: [
+        tdL("Total", { style: { fontWeight: 800, color: "#fbbf24" } }),
+        tdL(jsx("span", { className: "tg-faint", children: "—" })),
+        tdR(tot.sessions + " · " + tot.steps, { style: cstyle }),
+        tdR(fmtC(tot.in), { style: cstyle }),
+        tdR(fmtC(tot.out), { style: cstyle }),
+        tdR(fmtC(tot.think), { style: cstyle }),
+        tdR(fmtC(tot.cache), { style: cstyle }),
+        tdR(allPriced ? money(tot.cost) : "unpriced", { style: { fontWeight: 800, color: allPriced ? "#fde68a" : "#fbbf24" } }),
+        tdR(rt != null ? fmtMs(rt) : "—", { style: cstyle }),
+        tdR(decTps != null ? decTps + " tok/s" : "—", { style: cstyle }),
+        tdR(preTps != null ? preTps + " tok/s" : "—", { style: cstyle }),
+        tdR(avgTtft != null ? fmtMs(avgTtft) : "—", { style: cstyle }),
+      ],
+    }) : null,
+  ]})});
+};
 
 export const perfSessionTable = (rows: any[]) => {
   if (!rows || !rows.length) return jsx("div", { className: "tg-muted", style: { fontSize: 13, padding: "8px 4px" }, children: "No per-step timing recorded yet — only sessions with per-turn usage carry speed data." });
@@ -81,32 +153,17 @@ export const comparisonTable = (comparison: any[]) => jsx("div", { className: "t
   }, c.id)),
 ]})});
 
-export const sessionTable = (bySession: any[], openId: string | null, onToggle: (k: string | null) => void) => jsx("div", { className: "tg-tscroll", children: jsxs("table", { className: "tg-table tg-sticky", children: [
-  jsx("tr", { children: [thL(""), thL("Date"), thL("Session"), thL("Models used"), thR("Steps"), thR("Tools"), thR("In"), thR("Out"), thR("CacheR"), thR("Total"), thR("Cost")] }),
-  ...(bySession || []).flatMap((s: any) => {
-    const open = openId === s.id;
-    const row = jsxs("tr", {
-      className: "tg-tr tg-row-btn",
-      style: open ? { background: "rgba(251,191,36,0.05)" } : undefined,
-      onClick: () => { onToggle(open ? null : s.id); },
-      children: [
-        tdL(jsx("span", { className: "tg-chev" + (open ? " open" : ""), children: "▶" })),
-        tdL(s.date),
-        tdL(s.title || s.cwd || s.id, { style: { maxWidth: 180, whiteSpace: "normal", wordBreak: "break-word" }, title: s.title || s.cwd || s.id }),
-        tdL(s.modelMix, { style: { maxWidth: 200, whiteSpace: "normal", wordBreak: "break-word", fontSize: 12, color: "#94a3b8" }, title: (s.models || []).map((m: any) => (m.label || m.key) + " ×" + m.steps).join("\n") }),
-        tdR(s.events ? String(s.events.steps || 0) : "—"),
-        tdR(s.events ? String((s.events.toolCalls || 0) + (s.events.toolSubCalls || 0)) : "—"),
-        tdR(fmtC(s.uncachedInputTokens), { title: fmt(s.uncachedInputTokens) }),
-        tdR(fmtC(s.outputTokens), { title: fmt(s.outputTokens) }),
-        tdR(fmtC(s.cacheReadTokens), { title: fmt(s.cacheReadTokens) }),
-        tdR(fmtC(s.allTokens), { style: { fontWeight: 700 }, title: fmt(s.allTokens) }),
-        tdR(s.cost != null ? money(s.cost) : "—", { style: { fontWeight: 600, color: "#fde68a" } }),
-      ],
-    }, s.id);
-    if (!open) return [row];
-    return [row, jsx("tr", { className: "tg-drawer-row", children: jsx("td", { colSpan: 11, style: { padding: 0, borderBottom: "1px solid rgba(255,255,255,0.08)" }, children: sessionDrawer(s) }) }, s.id + "-drawer")];
-  }),
-]})});
+// Sessions / Cost-by-session table: the shared session columns (buckets + cost)
+// on the generic TgTable — paging off, expand → sessionDrawer.
+export const sessionTable = (bySession: any[], openId: string | null, onToggle: (k: string | null) => void) => TgTable({
+  columns: sessionCostColumns,
+  rows: bySession || [],
+  rowKey: (s: any) => s.id,
+  expandedId: openId, onToggle,
+  drawer: sessionDrawer,
+  empty: jsx("div", { className: "tg-muted", style: { fontSize: 13, padding: "12px 4px" }, children: "No sessions recorded yet." }),
+  rowClass: (s: any) => (s.archived ? "tg-archived" : ""),
+});
 
 export const dayTable = (byDay: any[]) => jsx("div", { className: "tg-tscroll", children: jsxs("table", { className: "tg-table tg-sticky", children: [
   jsx("tr", { children: [thL("Day"), thR("Sessions"), thR("Input"), thR("Output"), thR("Cache read"), thR("Cache write"), thR("Total"), thR("Cost")] }),
@@ -208,7 +265,22 @@ const modelCard = (m: any, patch: (id: string, p: any) => void, remove: (id: str
 export const pricingTab = (p: PricingProps) => {
   const d = p.draft;
   if (!d) return jsx("div", { style: { padding: 40, color: "#94a3b8", textAlign: "center" }, children: "Loading pricing table…" });
-  const patchModel = (id: string, patch: any) => p.setDraft((x: any) => (x ? { ...x, models: x.models.map((m: any) => (m.id === id ? { ...m, ...patch } : m)) } : x));
+  // A valid baseline id: the user's choice when it's still a local row, else the
+  // first local row. Keeps the selector + save always consistent.
+  const effectiveBaseline = (x: any) => {
+    const models = (x && x.models) || [];
+    const has = models.some((m: any) => m.id === x.baselineModel && m.local && m.id !== "local-free");
+    return has ? x.baselineModel : ((models.find((m: any) => m.local && m.id !== "local-free") || {}).id || null);
+  };
+  const patchModel = (id: string, patch: any) => p.setDraft((x: any) => {
+    if (!x) return x;
+    const models = x.models.map((m: any) => (m.id === id ? { ...m, ...patch } : m));
+    // A model that stops being local can no longer be the baseline.
+    const baselineModel = id === x.baselineModel && !models.find((m: any) => m.id === id && m.local)
+      ? ((models.find((m: any) => m.local && m.id !== "local-free") || {}).id || null)
+      : x.baselineModel;
+    return { ...x, models, baselineModel };
+  });
   const removeModel = (id: string) => p.setDraft((x: any) => {
     if (!x) return x;
     const models = x.models.filter((m: any) => m.id !== id);
@@ -217,12 +289,17 @@ export const pricingTab = (p: PricingProps) => {
     // card. If no corp model remains, clear it (the user must pick one) rather than
     // silently landing on a local row.
     if (referenceModel === id) referenceModel = (models.find((m: any) => !m.local) || {}).id || null;
-    return { ...x, models, referenceModel };
+    const baselineModel = id === x.baselineModel
+      ? ((models.find((m: any) => m.local && m.id !== "local-free") || {}).id || null)
+      : x.baselineModel;
+    return { ...x, models, referenceModel, baselineModel };
   });
   const refOptions = d.models.filter((m: any) => !m.local);
+  const baseOptions = d.models.filter((m: any) => m.local && m.id !== "local-free");
+  const baseValue = effectiveBaseline(d);
   return jsxs("div", { style: { display: "flex", flexDirection: "column", gap: 16 }, children: [
     jsxs("div", { className: "tg-card tg-refrow", children: [
-      jsx("div", { style: { flex: 1, minWidth: 240 }, children: [
+      jsxs("div", { style: { flex: 1, minWidth: 240 }, children: [
         jsx("div", { className: "tg-label", style: { color: "#fbbf24", marginBottom: 5 }, children: "★ WFH reference model" }),
         jsx("div", { style: { color: "#94a3b8", fontSize: 12, lineHeight: 1.5 }, children: "Local (home-lab) compute is valued against this rate card — the “what the corp would've billed” number behind every WFH savings figure." }),
       ]}),
@@ -232,17 +309,30 @@ export const pricingTab = (p: PricingProps) => {
         onChange: (e: any) => p.setDraft((x: any) => (x ? { ...x, referenceModel: e.target.value } : x)),
         children: refOptions.map((m: any) => jsx("option", { value: m.id, children: m.label }, m.id)),
       }),
-      jsx("button", { className: "tg-refresh", onClick: p.onSave, disabled: p.saving, children: p.saving ? "Saving…" : "💾 Save rates" }),
-      p.saveMsg ? jsx("span", { className: p.saveMsg.kind === "ok" ? "tg-flash-ok" : "tg-flash-err", children: p.saveMsg.text }) : null,
+      jsx("div", { style: { width: "100%", height: 1, background: "rgba(255,255,255,0.07)" } }),
+      jsxs("div", { style: { flex: 1, minWidth: 240 }, children: [
+        jsx("div", { className: "tg-label", style: { color: "#34d399", marginBottom: 5 }, children: "★ Local baseline model" }),
+        jsx("div", { style: { color: "#94a3b8", fontSize: 12, lineHeight: 1.5 }, children: "The home-lab model the comparison table marks as “baseline” — every “You save” figure is how much cheaper local runs than the paid cards. Pick the model your local compute actually metered." }),
+      ]}),
+      jsx("select", {
+        className: "tg-input", style: { minWidth: 250, cursor: "pointer" },
+        value: baseValue || "",
+        onChange: (e: any) => p.setDraft((x: any) => (x ? { ...x, baselineModel: e.target.value || null } : x)),
+        children: baseOptions.length
+          ? baseOptions.map((m: any) => jsx("option", { value: m.id, children: m.label }, m.id))
+          : [jsx("option", { value: "", children: "— no local model —" })],
+      }),
     ]}),
     jsxs("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap" }, children: [
       jsxs("div", { children: [
         jsx("div", { className: "tg-label", children: "Rate cards — $ per 1M tokens" }),
         jsx("div", { className: "tg-faint", style: { fontSize: 11, marginTop: 2 }, children: "Saved to " + (p.pricingPath || "your DSH home") + " · " + (d.fromFile ? "custom table (file)" : d.seeded ? "seeded from your trajectories (not saved yet)" : "built-in table (not saved yet)") }),
       ]}),
-      jsxs("div", { style: { display: "flex", gap: 8, alignItems: "center" }, children: [
-        jsx("button", { className: "tg-reprocess", onClick: p.onDiscover, disabled: p.discovering, children: p.discovering ? "Scanning…" : "🔎 Scan trajectories for local models" }),
+      jsxs("div", { style: { display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }, children: [
+        jsx("button", { className: "tg-reprocess", onClick: p.onDiscover, disabled: p.discovering, children: p.discovering ? "Scanning…" : "🔎 Scan trajectories for all models" }),
         p.discoverMsg ? jsx("span", { className: "tg-faint", style: { fontSize: 11 }, children: p.discoverMsg }) : null,
+        jsx("button", { className: "tg-refresh", onClick: p.onSave, disabled: p.saving, children: p.saving ? "Saving…" : "💾 Save rates" }),
+        p.saveMsg ? jsx("span", { className: p.saveMsg.kind === "ok" ? "tg-flash-ok" : "tg-flash-err", children: p.saveMsg.text }) : null,
       ]}),
     ]}),
     d.models.length ? jsx("div", { style: { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(min(340px, 100%), 1fr))", gap: 12 }, children: d.models.map((m: any) => modelCard(m, patchModel, removeModel, d.referenceModel === m.id, true)) }) : jsx("div", { className: "tg-muted", style: { fontSize: 13, padding: "12px 4px" }, children: "No rate cards yet — scan trajectories or add a model." }),

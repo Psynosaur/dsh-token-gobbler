@@ -5,27 +5,54 @@ import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join, normalize, extname, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { buildReport, buildBreakdown, buildPerformance, loadPricing, savePricing, resolvePaths, discoverModels, discoverLocalModels, pricingFilePath, reprocessTrajectories } from "./report.js";
+import { buildReport, buildBreakdown, buildPerformance, loadPricing, savePricing, resolvePaths, discoverModels, discoverModelCards, pricingFilePath, reprocessTrajectories, getCompactionDetail } from "./report.js";
 
 // amCharts 5 is vendored locally (vendor/amcharts) so the token charts render
 // offline instead of failing on a cdn.amcharts.com fetch. Resolve the directory
-// relative to THIS module (lib/index.js) so it works from the checkout and an
+// relative to THIS module (lib/index.ts) so it works from the checkout and an
 // installed package alike. Normalize and strip any trailing separator so the
 // served-path containment check compares like-for-like.
 const AMCHARTS_ROOT = normalize(fileURLToPath(new URL("../vendor/amcharts/", import.meta.url))).replace(/[/\\]+$/, "");
 
+/** Minimal DSH plugin host context (webServer injection container). */
+interface DshContext {
+  inject(deps: string[], fn: (wctx: DshWebContext) => void): void;
+}
+/** The web-context an inject() provides: effect lifecycle + the web server. */
+interface DshWebContext {
+  effect(fn: () => (() => void) | void, name?: string): void;
+  webServer: {
+    register(opts: { kind: string; path: string; handler: (req: DshReq, res: DshRes) => void | Promise<void> }): () => void;
+  };
+}
+/** A server request (subset of node:http IncomingMessage used here). */
+interface DshReq {
+  method?: string;
+  url?: string;
+  on(event: "data", cb: (chunk: string | Buffer) => void): void;
+  on(event: "end", cb: () => void): void;
+  on(event: "error", cb: (err: Error) => void): void;
+  destroy(): void;
+}
+/** A server response (subset of node:http ServerResponse used here). */
+interface DshRes {
+  writeHead(status: number, headers?: Record<string, string>): void;
+  setHeader(name: string, value: string): void;
+  end(data?: unknown): void;
+}
+
 export const name = "token-gobbler";
 export const inject = ["webServer"];
 
-export function apply(ctx, _config = {}) {
-  const sendJson = (res, status, body) => {
+export function apply(ctx: DshContext, _config: Record<string, unknown> = {}) {
+  const sendJson = (res: DshRes, status: number, body: unknown) => {
     res.writeHead(status, {
       "content-type": "application/json; charset=utf-8",
       "cache-control": "no-store",
     });
     res.end(JSON.stringify(body));
   };
-  const webAction = (method, action) => async (req, res) => {
+  const webAction = (method: string, action: () => unknown) => async (req: DshReq, res: DshRes) => {
     if (req.method !== method) {
       res.setHeader("allow", method);
       sendJson(res, 405, { ok: false, error: `Use ${method}` });
@@ -37,20 +64,27 @@ export function apply(ctx, _config = {}) {
       sendJson(res, 500, { ok: false, error: error instanceof Error ? error.message : String(error) });
     }
   };
-  const readBody = (req) => new Promise((resolve, reject) => {
-    let data = "";
-    req.on("data", (c) => {
-      data += c;
-      if (data.length > 1e6) { reject(new Error("body too large")); req.destroy(); }
+  // Collect raw Buffer chunks and decode ONCE at the end. Decoding each chunk
+  // separately (`data += c`) corrupts multibyte UTF-8 characters that are split
+  // across chunk boundaries — e.g. a non-ASCII pricing label in a large body
+  // would fail JSON.parse with a bogus 400.
+  const readBody = (req: DshReq) => new Promise<string>((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let size = 0;
+    req.on("data", (c: Buffer | string) => {
+      const buf = Buffer.isBuffer(c) ? c : Buffer.from(String(c));
+      size += buf.length;
+      if (size > 1e6) { reject(new Error("body too large")); req.destroy(); return; }
+      chunks.push(buf);
     });
-    req.on("end", () => resolve(data));
+    req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
     req.on("error", reject);
   });
 
   // Optional surface: only mounted when the web profile provides a webServer.
   ctx.inject(["webServer"], (wctx) => {
     wctx.effect(() => {
-      const disposers = [
+      const disposers: (() => void)[] = [
         wctx.webServer.register({
           kind: "prefix",
           path: "/token-gobbler/vendor",
@@ -60,7 +94,7 @@ export function apply(ctx, _config = {}) {
             const urlPath = decodeURIComponent((req.url || "").split("?")[0]);
             const rel = normalize(urlPath.replace(/^\/token-gobbler\/vendor/, "").replace(/^[/\\]+/, ""));
             const abs = normalize(join(AMCHARTS_ROOT, rel));
-            const mime = {
+            const mime: Record<string, string> = {
               ".js": "text/javascript; charset=utf-8",
               ".json": "application/json; charset=utf-8",
             };
@@ -95,6 +129,37 @@ export function apply(ctx, _config = {}) {
           handler: webAction("GET", () => buildPerformance()),
         }),
         wctx.webServer.register({
+          kind: "prefix",
+          path: "/token-gobbler/compaction",
+          handler: async (req, res) => {
+            // GET /token-gobbler/compaction?session=<sessionId>&index=<n> — the full
+            // detail of one compaction event, INCLUDING the generated summary text
+            // (kept out of the breakdown payload because it can be many KB).
+            if (req.method !== "GET") {
+              res.setHeader("allow", "GET");
+              sendJson(res, 405, { ok: false, error: "Use GET" });
+              return;
+            }
+            try {
+              const u = new URL(req.url || "", "http://localhost");
+              const sessionId = u.searchParams.get("session") || "";
+              const index = Number(u.searchParams.get("index") || "0");
+              if (!sessionId || !Number.isInteger(index) || index < 1) {
+                sendJson(res, 400, { ok: false, error: "session and index (1-based) are required" });
+                return;
+              }
+              const ev = getCompactionDetail(sessionId, index);
+              if (!ev) {
+                sendJson(res, 404, { ok: false, error: "compaction not found" });
+                return;
+              }
+              sendJson(res, 200, { ok: true, value: ev });
+            } catch (error) {
+              sendJson(res, 500, { ok: false, error: error instanceof Error ? error.message : String(error) });
+            }
+          },
+        }),
+        wctx.webServer.register({
           kind: "exact",
           path: "/token-gobbler/reprocess",
           handler: webAction("POST", () => reprocessTrajectories()),
@@ -102,7 +167,7 @@ export function apply(ctx, _config = {}) {
         wctx.webServer.register({
           kind: "exact",
           path: "/token-gobbler/discover-models",
-          handler: webAction("GET", () => discoverLocalModels(resolvePaths().dshHome)),
+          handler: webAction("GET", () => discoverModelCards(resolvePaths().dshHome)),
         }),
         wctx.webServer.register({
           kind: "exact",
@@ -136,7 +201,7 @@ export function apply(ctx, _config = {}) {
             }
             try {
               const raw = await readBody(req);
-              const body = raw ? JSON.parse(raw) : {};
+              const body = raw ? (JSON.parse(raw) as { models?: unknown; referenceModel?: unknown; baselineModel?: unknown }) : {};
               sendJson(res, 200, { ok: true, value: savePricing(resolvePaths().dshHome, body) });
             } catch (error) {
               sendJson(res, 400, { ok: false, error: error instanceof Error ? error.message : String(error) });

@@ -10,7 +10,7 @@ fresh from a snapshot each run (they shift as the session log grows), so the
 
 ```
 1. OPEN MODAL   → browser_click on the FAB (label: "Open Token Gobbler activity", glyph 🦃)
-2. RESOLVE TABS → browser_snapshot region ".tg-seg"  (lists Events Cost Models Performance Tokens Sessions Pricing)
+2. RESOLVE TABS → browser_snapshot region ".tg-seg"  (lists Events Cost Models Performance Tokens Combined (wip) Daily Sessions Pricing)
 3. FOR EACH TAB → browser_click on the tab button, then browser_get_text ".tg-modal-body"
                   and assert the tab's signature string (below).
 ```
@@ -24,6 +24,8 @@ fresh from a snapshot each run (they shift as the session log grows), so the
 | Models       | `WHAT YOU ACTUALLY RAN` (real mix)                      |
 | Performance  | `PERFORMANCE BY MODEL`                                   |
 | Tokens       | `TOKEN BREAKDOWN — PER TURN & STEP`                     |
+| Combined     | `⚡ SPEED — TOTALS & AVERAGES` + `🪙 TOKENS — TOTALS & AVERAGES` |
+| Daily        | `📅 SESSIONS OVER TIME` + `PER SESSION —` (heatmap)      |
 | Sessions     | `COST BY SESSION` (or the session table)                |
 | Pricing      | `RATE CARDS — $ PER 1M TOKENS`                          |
 
