@@ -72,8 +72,17 @@ export function resolvePaths(opts: ReportOptions = {}): ResolvedPaths {
   } else {
     const dirStore = join(dshHome, "storages", "session_projcache");
     const fileStore = join(dshHome, "storages", "session_projcache.json");
-    if (existsSync(dirStore) && statSync(dirStore).isDirectory()) { storePath = dirStore; storeKind = "dir"; }
-    else { storePath = fileStore; storeKind = "file"; }
+    // Prefer whichever store is more recently modified — on some installs (Ubuntu)
+    // DSH writes new sessions to the legacy file while the directory store is stale.
+    try {
+      const dirStat = statSync(dirStore);
+      const fileStat = statSync(fileStore);
+      if (dirStat.isDirectory() && dirStat.mtimeMs >= fileStat.mtimeMs) { storePath = dirStore; storeKind = "dir"; }
+      else { storePath = fileStore; storeKind = "file"; }
+    } catch {
+      if (existsSync(dirStore) && statSync(dirStore).isDirectory()) { storePath = dirStore; storeKind = "dir"; }
+      else { storePath = fileStore; storeKind = "file"; }
+    }
   }
   return {
     dshHome,
