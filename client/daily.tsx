@@ -94,6 +94,7 @@ export const DailyTab = ({ bySession, initialDay }: { bySession: any[]; initialD
           expandedId: expanded, onToggle: setExpanded,
           drawer: (s: any) => combinedDrawer(s, { defaultClosed: true }),
           page, setPage, pageSize: 25,
+          columns: { lastActive: true, tin: true, tout: true, tcache: true },
           empty: jsx("div", { className: "tg-muted", style: { fontSize: 13, padding: "12px 4px" }, children: "No combined per-step data" + (selDay ? " for " + selDay : " yet") + " — sessions with per-turn usage appear here." }),
         }),
       ]}),
