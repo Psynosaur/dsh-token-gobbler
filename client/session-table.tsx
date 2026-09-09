@@ -28,12 +28,31 @@ export const sessionRuntime = (s: any): string => {
   return has ? fmtMs(ms) : "—";
 };
 
+/** Format the last active time for display (HH:MM today, or MM/DD otherwise). */
+const lastActiveLabel = (s: any): string => {
+  const ts = s.meta?.lastPromptAt;
+  if (ts == null) return "—";
+  const ms = typeof ts === "string" ? Date.parse(ts) : ts;
+  if (isNaN(ms)) return "—";
+  const d = new Date(ms);
+  const now = new Date();
+  const isToday = d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth() && d.getDate() === now.getDate();
+  if (isToday) {
+    return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  }
+  return d.toLocaleDateString([], { month: "2-digit", day: "2-digit" });
+};
+
 export interface SessionColumnsOpts {
   turns?: boolean;   // extra "Turns" column (Performance tab)
   decode?: boolean;  // "Decode" tok/s
   prefill?: boolean; // "Prefill" tok/s
   runtime?: boolean; // "Runtime" (TTFT + decode)
   total?: boolean;   // "Total" tokens
+  lastActive?: boolean; // "Last Active" time
+  tin?: boolean;     // "In" (uncached input) tokens
+  tout?: boolean;    // "Out" (output) tokens
+  tcache?: boolean;  // "Cache" (cache read) tokens
 }
 
 /** Session title cell — archived sessions (archived in the DSH GUI) get a 📦 marker. */
@@ -44,16 +63,20 @@ const sessionTitle = (s: any) => s.archived
 /** The shared session column set. Default = the Daily/Combined shape:
  *  Date | Session | Models | Steps | Decode | Prefill | Runtime | Total. */
 export const sessionColumns = (o: SessionColumnsOpts = {}): Column[] => {
-  const { turns = false, decode = true, prefill = true, runtime = true, total = true } = o;
+  const { turns = false, decode = true, prefill = true, runtime = true, total = true, lastActive = false, tin = false, tout = false, tcache = false } = o;
   return [
     { key: "date", label: "Date" },
     { key: "title", label: "Session", render: sessionTitle },
-    { key: "modelMix", label: "Models", render: (s: any) => s.modelMix },
+    lastActive ? { key: "lastActive", label: "Last Active", align: "r" as const, render: lastActiveLabel, props: { style: { color: "#94a3b8", fontSize: 12 } } } : null,
+    { key: "modelMix", label: "Models", render: (s: any) => s.modelMix, props: { style: { whiteSpace: "normal", wordBreak: "break-word", overflow: "visible", textOverflow: "unset" } } },
     turns ? { key: "turns", label: "Turns", align: "r" as const, render: (s: any) => (s.stepTree || []).length || "—" } : null,
     { key: "steps", label: "Steps", align: "r" as const, render: (s: any) => s.events ? (s.events.steps || 0) : "—" },
     decode ? { key: "tokPerSec", label: "Decode", align: "r" as const, render: (s: any) => s.tokPerSec != null ? s.tokPerSec + " tok/s" : "—" } : null,
     prefill ? { key: "prefillPerSec", label: "Prefill", align: "r" as const, render: sessionPrefill, props: (s: any) => ({ title: "prompt processing = new (uncached) input tokens ÷ TTFT across all " + (s.steps || []).length + " step(s)" }) } : null,
     runtime ? { key: "runtime", label: "Runtime", align: "r" as const, render: sessionRuntime, props: { title: "session runtime = sum of (TTFT + decode time) across all steps — decode already contains the thinking window, so it is not added again" } } : null,
+    tin ? { key: "tin", label: "In", align: "r" as const, render: (s: any) => fmtC(s.uncachedInputTokens), props: (s: any) => ({ title: fmt(s.uncachedInputTokens) }) } : null,
+    tout ? { key: "tout", label: "Out", align: "r" as const, render: (s: any) => fmtC(s.outputTokens), props: (s: any) => ({ title: fmt(s.outputTokens) }) } : null,
+    tcache ? { key: "tcache", label: "Cache", align: "r" as const, render: (s: any) => fmtC(s.cacheReadTokens), props: (s: any) => ({ title: fmt(s.cacheReadTokens) }) } : null,
     total ? { key: "allTokens", label: "Total", align: "r" as const, render: (s: any) => fmtC(s.allTokens), props: { style: { fontWeight: 600 } } } : null,
   ].filter(Boolean) as Column[];
 };

@@ -554,7 +554,7 @@ const CombinedStepTable = ({ steps, defaultClosed = false, compactions, onCompac
       const turnStepKeys = new Set((turn.steps || []).map((st: any) => turn.turn + ":" + st.step));
       const anchoredHere: any[] = [];
       for (const [k, arr] of bannerAfter) if (turnStepKeys.has(k)) anchoredHere.push(...arr);
-      const headBanners = [...(beforeTurn.get(turn.turn) || [])];
+      const headBanners = (beforeTurn.get(turn.turn) || []).map(bannerRow);
       if (isClosed) return [...headBanners, header, ...(anchoredHere.length ? anchoredHere.map(bannerRow) : [])];
       return [
         ...headBanners,
@@ -621,12 +621,12 @@ export const combinedDrawer = (s: any, opts: { defaultClosed?: boolean } = {}) =
   // The scatter metrics: one dot series each, fixed color per metric (the
   // window colors are reserved for the context-fill lines + chips).
   const PERF_METRICS = [
-    { key: "in", name: "in", color: "#9ae288", unit: "tok" },
+    { key: "in", name: "in", color: "#4ade80", unit: "tok" },
     { key: "out", name: "out", color: "#94a3b8", unit: "tok" },
     { key: "thinking", name: "thinking", color: "#c084fc", unit: "tok",  radius: 2 },
     { key: "cache", name: "cache", color: "#94a3b8", unit: "tok" },
-    { key: "pf", name: "prefill", color: "#fbbf24", unit: "tok/s" },
-    { key: "dc", name: "decode", color: "#f9fd02", unit: "tok/s" },
+    { key: "pf", name: "prefill", color: "#fb923c", unit: "tok/s" },
+    { key: "dc", name: "decode", color: "#facc15", unit: "tok/s" },
   ];
   // Pre-formatted multi-line tooltip text for one step (the single shared box).
   const tipFor = (r: any): string => {
@@ -694,12 +694,12 @@ export const combinedDrawer = (s: any, opts: { defaultClosed?: boolean } = {}) =
       const first = regimeRows[next][0];
       lineRows.push({ g: first.g, ctx: first.ctx, label: name + " -> reset" });
     }
-    perfSeries.push({ key: "ctx", label: name, color: c, unit: "ctx", axis: 0, regime: r, line: true, data: lineRows });
-    // Scatter dots — one series per metric on the right LOG axis, all sharing
-    // the window's regime so one chip toggles the whole window (dots + line +
-    // its ✂ boundaries).
+    perfSeries.push({ key: "ctx", label: name, color: c, unit: "ctx", axis: 0, regime: r, line: true, fill: true, data: lineRows });
+    // Metric lines — one series per metric on the right LOG axis, all sharing
+    // the window's regime so one chip toggles the whole window (lines + context
+    // line + its ✂ boundaries).
     for (const m of PERF_METRICS) {
-      perfSeries.push({ key: m.key, label: m.name, color: m.color, unit: m.unit, axis: 1, regime: r, bullet: "circle", data: rows, radius: m.radius });
+      perfSeries.push({ key: m.key, label: m.name, color: m.color, unit: m.unit, axis: 1, regime: r, line: true, data: rows });
     }
   });
   // Every row (all windows) feeds the single shared multi-line tooltip.
@@ -710,13 +710,13 @@ export const combinedDrawer = (s: any, opts: { defaultClosed?: boolean } = {}) =
   // N-1 and starts regime N) — the line hides when either side is hidden.
   const perfRules = (s.compactionEvents || [])
     .filter((c: any) => c.contextBefore != null && c.afterTurn != null && c.afterStep != null && stepG[c.afterTurn + ":" + c.afterStep] != null)
-    // .map((c: any) => ({
-    //   x: stepG[c.afterTurn + ":" + c.afterStep],
-    //   label: "✂ C" + c.index,
-    //   tip: "Compaction " + c.index + " · after Turn " + c.afterTurn + " · Step " + c.afterStep + " · context " + fmtC(c.contextBefore) + " tok",
-    //   color: "#f472b6",
-    //   windows: [c.index - 1, c.index] as [number, number],
-    // }));
+    .map((c: any) => ({
+      // x: stepG[c.afterTurn + ":" + c.afterStep],
+      // label: "✂ C" + c.index,
+      // tip: "Compaction " + c.index + " · after Turn " + c.afterTurn + " · Step " + c.afterStep + " · context " + fmtC(c.contextBefore) + " tok",
+      // color: "#f472b6",
+      // windows: [c.index - 1, c.index] as [number, number],
+    }));
   const perfHas = perfSeries.length > 0;
   const meta: [string, any][] = [
     ["Project", s.cwd],
@@ -767,7 +767,7 @@ export const combinedDrawer = (s: any, opts: { defaultClosed?: boolean } = {}) =
         xMinStep: 1,
         height: 400,
       }),
-      jsx("div", { className: "tg-faint", style: { fontSize: 10, marginTop: 6 }, children: "One chart for every compaction regime — x = step (session time; the shared axis auto-scales to the visible data, or pin its minimum with the x-min input). The only lines are the context filling up: each window's line (left axis = context size) rises step by step as the context fills, then drops at its ✂ compaction to the next window's starting context — the session's context sawtooth, in the window's color. Every step also plots as scatter dots on the right log axis, one color per metric — in / out / thinking / cache (tokens) and prefill / decode (tok/s); hover any dot for that step's full stats in one box. Click a window chip to remove or restore a whole window: its dots, its context line and the ✂ boundary lines it bounds all hide with it, and the x-axis rescales to the remaining windows. Each ✂ line marks a compaction, drawn at the step after which it ran: windows left of ✂ C1 ran before compaction 1, between ✂ C1 and ✂ C2 after it, and so on." }),
+      jsx("div", { className: "tg-faint", style: { fontSize: 10, marginTop: 6 }, children: "One chart for every compaction regime — x = step (session time; the shared axis auto-scales to the visible data, or pin its minimum with the x-min input). The context filling up is shown as filled area lines: each window's line (left axis = context size) rises step by step as the context fills, then drops at its ✂ compaction to the next window's starting context — the session's context sawtooth, in the window's color. Every step also plots as lines on the right log axis, one color per metric — in / out / thinking / cache (tokens) and prefill / decode (tok/s); hover any line for that step's full stats in one box. Click a window chip to remove or restore a whole window: its lines, its context area and the ✂ boundary lines it bounds all hide with it, and the x-axis rescales to the remaining windows. Each ✂ line marks a compaction, drawn at the step after which it ran: windows left of ✂ C1 ran before compaction 1, between ✂ C1 and ✂ C2 after it, and so on." }),
     ]}) : null,
     (s.stepTree && s.stepTree.length) ? jsxs("div", { children: [
       jsx("div", { className: "tg-drawer-sec", children: "Per turn & step — tokens + speed (combined)" }),

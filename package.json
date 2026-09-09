@@ -44,6 +44,7 @@
     "node": ">=24"
   },
   "scripts": {
+    "prepare": "npm run build",
     "test": "npm run build:lib && node --test test/*.test.js",
     "usage": "node bin/token-gobbler.js",
     "usage:json": "node bin/token-gobbler.js --json",

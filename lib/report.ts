@@ -1286,9 +1286,15 @@ export function buildBreakdown(opts: ReportOptions = {}) {
           .sort((a, b) => a[0] - b[0])
           .map(([turn, turnSteps]) => ({ turn, steps: turnSteps }));
       }
+      // Attribute the session to the day it was last active (lastPromptAt), not
+      // the day it was created — most sessions are continued across days.
+      const lastActive = s.meta?.lastPromptAt != null
+        ? (typeof s.meta.lastPromptAt === "string" ? Date.parse(s.meta.lastPromptAt) : s.meta.lastPromptAt)
+        : null;
+      const dateTs = (lastActive != null && lastActive > (s.createdAt || 0)) ? lastActive : s.createdAt;
       return {
         id: s.id,
-        date: localDate(s.createdAt),
+        date: localDate(dateTs),
         cwd: s.cwd,
         title: s.title,
         model,

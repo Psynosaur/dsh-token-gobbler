@@ -21,6 +21,7 @@ export type AmSeries = {
   data?: Record<string, any>[]; // optional per-series data (e.g. scatter regime subsets); falls back to the chart data
   bullet?: "circle" | "triangle"; // scatter: dot shape (triangle separates a second metric on a shared chart)
   line?: boolean;         // scatter: draw a VISIBLE line through the points in data order (no dots)
+  fill?: boolean;         // scatter line: translucent fill under the line (area-style)
   dash?: string;          // scatter line: stroke dash pattern (e.g. "1 3" = dotted) — pairs with a solid line
   group?: string;         // scatter: series sharing a group ride their OWN hidden value axis,
                           // auto-scaled (min/max from the group's data) — per-group scaling
@@ -374,7 +375,10 @@ export const AmBarChart = (props: AmChartProps) => {
         }
         // Data series — lines FIRST (so they render behind the dots of the
         // series pushed later), dots after.
-        const dataMeta: { ser: any; k: string | number; ctxs: number[] }[] = [];
+        const dataMeta: { ser: any; k: string | number; mk?: string; ctxs: number[] }[] = [];
+        // Build a set of metric keys from the metric chips so we can identify
+        // which series are metric series (for metric chip toggling).
+        const metricKeys = new Set((props.metricChips || []).map((c) => c.k));
         for (const s of [...props.series.filter((x) => x.line), ...props.series.filter((x) => !x.line)]) {
           // Line series use the SMOOTHED XY series (tension spline) so a
           // window's sweep reads as one clean ribbon instead of a jagged
@@ -395,6 +399,14 @@ export const AmBarChart = (props: AmChartProps) => {
             const st: any = { stroke: am5.color(s.color), strokeOpacity: 0.9, strokeWidth: 1.5 };
             if (s.dash) st.dash = s.dash;
             ser.strokes.template.setAll(st);
+            // Optional translucent fill under the line (area-style).
+            if (s.fill) {
+              ser.fills.template.setAll({
+                visible: true,
+                fill: am5.color(s.color),
+                fillOpacity: 0.15,
+              });
+            }
           } else {
             ser.strokes.template.setAll({ stroke: am5.color(s.color), strokeOpacity: 0 }); // dots only, no connecting line
             ser.bullets.push(() => am5.Bullet.new(root, {
@@ -425,7 +437,9 @@ export const AmBarChart = (props: AmChartProps) => {
           ser.data.setAll(rows);
           // Remember the series' toggle key (regime, or name) + its x values so
           // a chip toggle can hide it and rescale the x-axis to the rest.
-          dataMeta.push({ ser, k: s.regime != null ? s.regime : s.label, mk: s.bullet ? s.key : undefined, ctxs: rows.map((r) => Number(r[props.xField || "x"]) || 0) });
+          // mk = metric key for metric chip toggling (set if this series' key
+          // matches a metric chip key; otherwise undefined).
+          dataMeta.push({ ser, k: s.regime != null ? s.regime : s.label, mk: metricKeys.has(s.key) ? s.key : undefined, ctxs: rows.map((r) => Number(r[props.xField || "x"]) || 0) });
         }
         // Shared multi-line tooltip (tipField): ONE dedicated invisible series
         // over ALL points carries a single tooltip box. The cursor is told to
