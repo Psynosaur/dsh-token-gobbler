@@ -7,7 +7,8 @@
 // volume.
 //
 //   node scripts/day-compare.js                          # model ≈ davidau, every day
-//   node scripts/day-compare.js --vs 2026-09-10           # focus a specific day
+//   node scripts/day-compare.js --vs 2026-09-10           # focus a specific day vs the rest
+//   node scripts/day-compare.js --compare 2026-09-09 2026-09-10 # compare two exact days
 //   node scripts/day-compare.js --model qwen3.8           # any model-id substring
 //   node scripts/day-compare.js --model auto              # the busiest LOCAL model
 //   node scripts/day-compare.js --all                     # every model in the corpus
@@ -53,7 +54,14 @@ const {
 // ── args ────────────────────────────────────────────────────────────────────
 const argv = process.argv.slice(2);
 const has = (f) => argv.includes(f);
-const val = (f, d) => { const i = argv.indexOf(f); return i >= 0 && argv[i + 1] ? argv[i + 1] : d; };
+const val = (f, d) => { const i = argv.indexOf(f); return i >= 0 && argv[i + 1] && !argv[i + 1].startsWith("--") ? argv[i + 1] : d; };
+const valuesAfter = (f) => {
+  const i = argv.indexOf(f);
+  if (i < 0) return [];
+  const out = [];
+  for (let j = i + 1; j < argv.length && !argv[j].startsWith("--"); j++) out.push(argv[j]);
+  return out;
+};
 const num = (f, d) => { const v = parseFloat(val(f, "")); return Number.isFinite(v) ? v : d; };
 
 if (has("--help") || has("-h")) {
@@ -72,7 +80,8 @@ MODEL SELECTION
                        clean sample of this model — the Runs tab holds them out too)
 
 COMPARISON
-  --vs YYYY-MM-DD      focus day                              (default: the latest day)
+  --vs YYYY-MM-DD      focus day vs all other days             (default: the latest day)
+  --compare <day> <day> compare exactly two calendar days (left vs right)
   --fast <n>           "fast step" threshold in tok/s          (default 60)
   --band <lo-hi>       clean-subset context band, in K tokens  (default 32-64)
   --out-band <lo-hi>   clean-subset output-token band          (default 100-400)
@@ -100,6 +109,25 @@ const json = has("--json");
 const wantSessions = has("--sessions");
 const top = parseInt(val("--top", "40"), 10) || 40;
 const fast = num("--fast", 60);
+const compareDays = valuesAfter("--compare");
+if (has("--compare") && compareDays.length !== 2) {
+  console.error("day-compare: --compare expects exactly two YYYY-MM-DD values (left right).");
+  process.exit(2);
+}
+if (compareDays.some((day) => !/^\d{4}-\d{2}-\d{2}$/.test(day))) {
+  console.error("day-compare: --compare values must be YYYY-MM-DD dates (left right).");
+  process.exit(2);
+}
+if (has("--compare") && has("--vs")) {
+  console.error("day-compare: use either --compare or --vs, not both.");
+  process.exit(2);
+}
+const compareDayA = compareDays[0] || "";
+const compareDayB = compareDays[1] || "";
+if (compareDayA && compareDayA === compareDayB) {
+  console.error("day-compare: --compare needs two different dates.");
+  process.exit(2);
+}
 const B = Math.max(20, parseInt(val("--boot", "400"), 10) || 400);
 const minSteps = Math.max(2, parseInt(val("--min-steps", "3"), 10) || 3);
 
@@ -151,10 +179,26 @@ if (!steps.length) {
 }
 
 const days = meta.days;
-const focusDay = val("--vs", days[days.length - 1]);
+const compareMode = compareDays.length === 2;
+const focusDay = compareMode ? compareDayA : val("--vs", days[days.length - 1]);
+const comparisonDay = compareMode ? compareDayB : "";
 const byDay = groupRows(steps, (r) => r.day);
 const focus = steps.filter((r) => r.day === focusDay);
-const rest = steps.filter((r) => r.day !== focusDay);
+const rest = compareMode ? steps.filter((r) => r.day === comparisonDay) : steps.filter((r) => r.day !== focusDay);
+const displayByDay = compareMode
+  ? byDay.filter(([day]) => day === focusDay || day === comparisonDay)
+  : byDay;
+const displaySessions = compareMode
+  ? sessions.filter((s) => s.day === focusDay || s.day === comparisonDay)
+  : sessions;
+if (compareMode) {
+  const missing = [focusDay, comparisonDay].filter((day) => !days.includes(day));
+  if (missing.length) {
+    console.error(`day-compare: --compare day(s) not present in the selected corpus: ${missing.join(", ")}`);
+    console.error(`  available days: ${days.join(", ")}`);
+    process.exit(3);
+  }
+}
 
 // ── sections ────────────────────────────────────────────────────────────────
 const out = [];
@@ -169,33 +213,39 @@ if (meta.skipped.mixed) {
     meta.skipped.mixedDays.join(", ") + "); not a clean sample of this model. --include-mixed keeps them.");
 }
 if (meta.skipped.noSteps) out.push("  note          : " + meta.skipped.noSteps + " session(s) had no usable per-step usage and were skipped");
-out.push("  focus day     : " + focusDay + "  (" + fmtInt(focus.length) + " steps vs " + fmtInt(rest.length) + " on every other day)");
+if (compareMode) {
+  out.push("  comparison    : " + focusDay + " (left) vs " + comparisonDay + " (right)  (" + fmtInt(focus.length) + " vs " + fmtInt(rest.length) + " steps)");
+} else {
+  out.push("  focus day     : " + focusDay + "  (" + fmtInt(focus.length) + " steps vs " + fmtInt(rest.length) + " on every other day)");
+}
 out.push("");
 
 out.push("  DAILY ROLLUP — this model's steps only, time-weighted");
 out.push(rule(112));
-out.push(dailyTable(byDay, { fast }));
+out.push(dailyTable(displayByDay, { fast }));
 out.push("");
 
-out.push("  FOCUS DAY " + focusDay + " vs ALL OTHER DAYS — matched slices");
+out.push(compareMode
+  ? "  DAY " + focusDay + " vs " + comparisonDay + " — matched slices"
+  : "  FOCUS DAY " + focusDay + " vs ALL OTHER DAYS — matched slices");
 out.push(rule(112));
 out.push(matchedTable({
   title: "  by CONTEXT band (tokens in the prompt)",
-  focusLabel: focusDay, restLabel: "other days",
+  focusLabel: focusDay, restLabel: compareMode ? comparisonDay : "other days",
   focus, rest, bands: CTX_BANDS, keyFn: (r) => r.ctx, statFn: wDecode, statLabel: "decode tok/s (time-weighted) — context is the strongest confound",
   minSteps, B,
 }));
 out.push("");
 out.push(matchedTable({
   title: "  by OUTPUT size (tokens generated in the step)",
-  focusLabel: focusDay, restLabel: "other days",
+  focusLabel: focusDay, restLabel: compareMode ? comparisonDay : "other days",
   focus, rest, bands: OUT_BANDS, keyFn: (r) => r.out, statFn: wDecode, statLabel: "decode tok/s (time-weighted) — short steps carry more per-step overhead",
   minSteps, B,
 }));
 out.push("");
 out.push(matchedTable({
   title: "  by REASONING share (thinking tokens ÷ output)",
-  focusLabel: focusDay, restLabel: "other days",
+  focusLabel: focusDay, restLabel: compareMode ? comparisonDay : "other days",
   focus, rest, bands: THINK_BANDS, keyFn: (r) => (r.out > 0 ? r.think / r.out : null), statFn: wDecode,
   statLabel: "decode tok/s (time-weighted) — rules out \"it just reasoned less today\"", minSteps, B,
 }));
@@ -225,7 +275,7 @@ for (const [label, statFn, mode] of cleanStats) {
 // ── one more slice: matched on the requested reasoning band ─────────────────
 const inThink = (r) => r.out > 0 && r.think / r.out >= thinkLo && r.think / r.out < thinkHi;
 const thinkF = focus.filter(inThink), thinkR = rest.filter(inThink);
-out.push("  REASONING-MATCHED — steps whose thinking share is " + Math.round(thinkLo * 100) + "-" +
+out.push("  REASONING-MATCHED — " + focusDay + " vs " + (compareMode ? comparisonDay : "other days") + "; steps whose thinking share is " + Math.round(thinkLo * 100) + "-" +
   (Number.isFinite(thinkHi) ? Math.round(thinkHi * 100) : "∞") + "% of their output (--think)");
 out.push(rule(112));
 if (thinkF.length < minSteps || thinkR.length < minSteps) {
@@ -243,6 +293,7 @@ out.push("  FAST REGIME — share of steps above " + fast + " tok/s");
 out.push(rule(112));
 out.push("  " + pad("day", 14) + CTX_BANDS.map(([, , l]) => padL(l, 12)).join("") + padL("ALL", 12));
 for (const [day, rows] of byDay) {
+  if (compareMode && day !== focusDay && day !== comparisonDay) continue;
   const cells = CTX_BANDS.map(([lo, hi]) => {
     const R = rows.filter((r) => r.ctx >= lo && r.ctx < hi);
     const s = fastShare(R, fast);
@@ -259,6 +310,7 @@ out.push("  P2P EVIDENCE — trajectory text mentions, NOT the server's actual c
 out.push(rule(112));
 out.push("  " + pad("day", 14) + padL("p2p steps", 11) + padL("decode", 9) + padL("ctx p50", 10) + padL("no-p2p", 10) + padL("decode", 9) + padL("ctx p50", 10));
 for (const [day, rows] of byDay) {
+  if (compareMode && day !== focusDay && day !== comparisonDay) continue;
   const cell = (R) => (R.length ? [fmt1(wDecode(R)), R.length, fmtC0(quantile(R.map((r) => r.ctx), 0.5))] : ["—", 0, "—"]);
   const [d1, n1, c1] = cell(rows.filter((r) => r.p2p));
   const [d2, n2, c2] = cell(rows.filter((r) => !r.p2p));
@@ -271,7 +323,7 @@ out.push("");
 
 // ── per-session ─────────────────────────────────────────────────────────────
 if (wantSessions) {
-  const rows = [...sessions].sort((a, b) => (a.day < b.day ? -1 : a.day > b.day ? 1 : (a.t0 || 0) - (b.t0 || 0)));
+  const rows = [...displaySessions].sort((a, b) => (a.day < b.day ? -1 : a.day > b.day ? 1 : (a.t0 || 0) - (b.t0 || 0)));
   const shown = rows.slice(-top);
   out.push("  PER-SESSION (this model's steps only" + (rows.length > shown.length ? ", last " + shown.length + " of " + rows.length : "") + ")");
   out.push(rule(112));
@@ -309,8 +361,21 @@ if (json) {
     return { focus: fn(F), rest: fn(R), deltaPct: ci ? ci.value : null, ci };
   };
   console.log(JSON.stringify({
-    meta: { ...meta, focusDay, fast, clean: { ctx: [bandLo, bandHi], out: [outLo, outHi], think: [thinkLo * 100, thinkHi * 100] }, boot: B },
+    meta: {
+      ...meta,
+      focusDay,
+      comparisonDay: compareMode ? comparisonDay : null,
+      comparisonMode: compareMode ? "day-vs-day" : "day-vs-rest",
+      fast,
+      clean: { ctx: [bandLo, bandHi], out: [outLo, outHi], think: [thinkLo * 100, thinkHi * 100] },
+      boot: B,
+    },
     days: dayJson,
+    comparison: {
+      leftDay: focusDay,
+      rightDay: compareMode ? comparisonDay : null,
+      mode: compareMode ? "day-vs-day" : "day-vs-rest",
+    },
     focus: summary(focus),
     rest: summary(rest),
     matched: {
@@ -325,7 +390,7 @@ if (json) {
       prefill: m(cleanF, cleanR, wPrefill),
       fastShare: m(cleanF, cleanR, (R) => (fastShare(R, fast) == null ? null : fastShare(R, fast) * 100)),
     },
-    sessions: sessions.map((s) => ({ ...s, title: s.title, cwd: undefined })),
+    sessions: displaySessions.map((s) => ({ ...s, title: s.title, cwd: undefined })),
   }, null, 1));
 } else {
   console.log(out.join("\n"));
