@@ -191,6 +191,13 @@ export interface ParsedTrajectory {
     *  (1 = after the 1st compaction, 2 = after the 2nd, …). Failed compactions
     *  leave the original messages in the context, so they do not advance it. */
   postCompaction: Record<string, number>;
+  /** Whether this session had P2P (GPU peer-to-peer) communication ENABLED —
+   *  i.e. the trajectory carries affirmative evidence of P2P being switched on
+   *  ("P2P access enabled", "enable P2P", "P2P support", a driver patched for
+   *  P2P, …), not merely a passing mention of the topic. */
+  p2p: boolean;
+  /** How many times "p2p" appears anywhere in the trajectory (mention volume). */
+  p2pMentions: number;
 }
 
 /** Recursively find *.zstd trajectory files under a root. */
@@ -242,7 +249,7 @@ export const emptyEvents = (): EventCounts => ({ steps: 0, toolCalls: 0, toolSub
 
 export function parseTrajectoryText(text: string): ParsedTrajectory {
   const lines = String(text).split("\n").filter(Boolean);
-  const out: ParsedTrajectory = { meta: null, usage: [], modelCounts: {}, modelChanges: [], stepSeqs: [], events: emptyEvents(), tools: {}, toolCalls: {}, toolCallArgs: {}, stepTools: {}, stepToolArgs: {}, decode: { tokens: 0, ms: 0, steps: 0 }, prefill: { tokens: 0, ms: 0, steps: 0 }, systemChars: 0, toolsChars: 0, contextWindow: null, stepContext: {}, compactions: [], prunes: 0, prunedTokens: 0, postCompaction: {} };
+  const out: ParsedTrajectory = { meta: null, usage: [], modelCounts: {}, modelChanges: [], stepSeqs: [], events: emptyEvents(), tools: {}, toolCalls: {}, toolCallArgs: {}, stepTools: {}, stepToolArgs: {}, decode: { tokens: 0, ms: 0, steps: 0 }, prefill: { tokens: 0, ms: 0, steps: 0 }, systemChars: 0, toolsChars: 0, contextWindow: null, stepContext: {}, compactions: [], prunes: 0, prunedTokens: 0, postCompaction: {}, p2p: false, p2pMentions: 0 };
   let curModel: string | null = null;
   let curProvider: string | null = null;
   // First assistant/chunk time per (turn, step) — the stream start. The usage chunk
@@ -577,6 +584,23 @@ export function parseTrajectoryText(text: string): ParsedTrajectory {
   out.toolsChars = toolsChars;
   out.contextWindow = contextWindow;
   out.compactions = [...compactionBy.values()].sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0));
+  // ── P2P (GPU peer-to-peer) evidence ────────────────────────────────────────
+  // A session is credited with P2P when its trajectory carries AFFIRMATIVE
+  // evidence that peer-to-peer was switched on — not merely because the topic was
+  // discussed (a session that only asks about P2P, or writes a report about it,
+  // must not count). The signals below are the enablement phrasings that show up
+  // in nvidia-smi/llama-server output and driver-patch work.
+  const p2pText = text.toLowerCase();
+  const P2P_EVIDENCE: RegExp[] = [
+    /p2p\s+(?:access\s+)?(?:is\s+|was\s+|now\s+)?enabled/i,   // "P2P access enabled", "P2P is enabled"
+    /enabl\w*\s+(?:the\s+)?p2p/i,                              // "enable P2P", "enabling p2p"
+    /p2p\s*[:=]\s*(?:on|true|yes|ok|enabled)/i,                // "P2P: on" / "P2P=true"
+    /(?:driver|kernel)[^.\n]{0,40}p2p/i,                       // a driver/kernel patched FOR p2p
+    /p2p\s+(?:patch|patched|workaround)/i,                     // "p2p patch"
+    /nvlink[^.\n]{0,30}p2p|p2p[^.\n]{0,30}nvlink/i,            // nvlink ↔ p2p
+  ];
+  out.p2pMentions = (p2pText.match(/p2p/g) || []).length + (p2pText.match(/peer-to-peer|peer to peer/g) || []).length;
+  out.p2p = P2P_EVIDENCE.some((re) => re.test(text));
   return out;
 }
 
@@ -645,7 +669,7 @@ export function readTrajectory(filePath: string): ParsedTrajectory | null {
 // Map so unchanged trajectories are served from the persisted parse without
 // re-reading, re-decompressing, or re-parsing. After a load batch that recomputed
 // any entries, saveDiskCache() flushes the updated Map back to disk.
-const CACHE_VERSION = 12; // bumped: EventCounts now includes userStops (turn/end aborted-by-user)
+const CACHE_VERSION = 13; // bumped: ParsedTrajectory now carries p2p / p2pMentions (GPU peer-to-peer evidence)
 let _diskCachePath: string | null = null;
 let _diskCacheLoaded = false;
 

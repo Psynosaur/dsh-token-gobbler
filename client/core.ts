@@ -86,9 +86,9 @@ export type TgCache = { v: 1; home: string; fp: string; at: number; usage: any; 
 // report math) — the fingerprint only covers trajectory growth, so a changed
 // computation would otherwise keep serving stale cached points. The ♻ Reprocess
 // button also clears the cache explicitly.
-const CACHE_VERSION = 3; // v3: EventCounts now includes userStops (turn/end aborted-by-user); cached breakdown chips would otherwise stay 0
+const CACHE_VERSION = 4; // v4: sessions now carry p2p / p2pMentions (Runs tab) — a cached breakdown has neither
 const CACHE_KEY = "tg:cache:v" + CACHE_VERSION;
-const PREV_KEYS = ["tg:cache:v1", "tg:cache:v2"]; // superseded cache keys — removed so they stop eating quota
+const PREV_KEYS = ["tg:cache:v1", "tg:cache:v2", "tg:cache:v3"]; // superseded cache keys — removed so they stop eating quota
 const b64FromBytes = (bytes: Uint8Array): string => {
   let bin = "";
   for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, Array.from(bytes.subarray(i, i + 0x8000)));

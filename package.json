@@ -25,7 +25,8 @@
     "cordis.patch.yml",
     "lib/**",
     "bin/**",
-    "vendor/**"
+    "vendor/**",
+    "scripts/**"
   ],
   "dsh": {
     "bundle": {
@@ -48,12 +49,16 @@
     "test": "npm run build:lib && node --test test/*.test.js",
     "usage": "node bin/token-gobbler.js",
     "usage:json": "node bin/token-gobbler.js --json",
+    "report:days": "node scripts/day-compare.js",
+    "report:p2p": "node scripts/p2p-report.js",
+    "report:snapshot": "node scripts/corpus-snapshot.js",
     "build": "npm run build:lib && npm run build:client",
     "build:lib": "tsc -p tsconfig.build.json",
     "build:client": "esbuild client/index.ts --bundle --format=iife --target=es2022 --platform=browser --external:react --external:react/jsx-runtime --loader:.css=text --outfile=lib/client.js",
     "watch:client": "esbuild client/index.ts --bundle --format=iife --target=es2022 --platform=browser --external:react --external:react/jsx-runtime --loader:.css=text --outfile=lib/client.js --watch",
     "typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.client.json",
-    "typecheck:client": "tsc -p tsconfig.client.json"
+    "typecheck:client": "tsc -p tsconfig.client.json",
+    "deploy": "npm run build && cp lib/*.js ~/.dsh/profiles/web/node_modules/token-gobbler/lib/"
   },
   "devDependencies": {
     "@types/node": "^26.4.1",

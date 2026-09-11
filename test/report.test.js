@@ -137,6 +137,26 @@ test("parseTrajectoryText: header-only -> no usage", () => {
   assert.equal(r.usage.length, 0);
 });
 
+// ── P2P evidence ─────────────────────────────────────────────────────────
+test("parseTrajectoryText: p2p — affirmative enablement evidence counts", () => {
+  const mk = (text) => parseTrajectoryText(JSON.stringify({ type: "session", id: "s", cwd: "/x", data: { text } }));
+  // nvidia-smi / driver confirmation lines
+  assert.equal(mk("P2P access enabled between GPU 0 and GPU 1").p2p, true);
+  assert.equal(mk("P2P is enabled by default in this build").p2p, true);
+  assert.equal(mk("we need to enable P2P for the dual 3090s").p2p, true);
+  assert.equal(mk("P2P: on").p2p, true);
+  assert.equal(mk("patch the nvidia driver with p2p support").p2p, true);
+});
+
+test("parseTrajectoryText: p2p — a passing mention is NOT enablement", () => {
+  const mk = (text) => parseTrajectoryText(JSON.stringify({ type: "session", id: "s", cwd: "/x", data: { text } }));
+  const off = mk("what does P2P mean for multi-gpu inference?");
+  assert.equal(off.p2p, false);
+  // …but the mention volume is still recorded so the UI can flag it for triage
+  assert.equal(off.p2pMentions, 1);
+  assert.equal(mk("no p2p here at all").p2pMentions, 1);
+});
+
 test("readTrajectory: content-hash parse cache", () => {
   const dir = mkdtempSync(join(tmpdir(), "tg-cache-"));
   const p = join(dir, "session.jsonl.zstd");

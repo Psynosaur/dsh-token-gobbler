@@ -755,6 +755,7 @@ interface Sources {
   stepToolArgsById: Map<string, Record<string, Record<string, number>>>;
   stepToolsById: Map<string, Record<string, string[]>>;
   usageById: Map<string, UsageRecord[]>;
+  p2pById: Map<string, { p2p: boolean; mentions: number }>;
   stepCtxById: Map<string, { byStep: Record<string, { sys: number; tools: number; msg: number }>; window: number | null; post: Record<string, number> }>;
   compactionsById: Map<string, { events: CompactionEvent[]; prunes: number; prunedTokens: number }>;
   aggEvents: EventCounts;
@@ -782,6 +783,7 @@ function loadSources(opts: ReportOptions = {}): Sources {
   const stepToolsById = new Map<string, Record<string, string[]>>(); // sessionId -> { "turn:step": [toolNames] }
   const stepCtxById = new Map<string, { byStep: Record<string, { sys: number; tools: number; msg: number }>; window: number | null; post: Record<string, number> }>(); // sessionId -> per-step context allocation (chars) + window limit + post-compaction regime index per step
   const compactionsById = new Map<string, { events: CompactionEvent[]; prunes: number; prunedTokens: number }>(); // sessionId -> compaction events (existence + impact) + prune totals
+  const p2pById = new Map<string, { p2p: boolean; mentions: number }>(); // sessionId -> P2P enablement evidence + mention volume
   const aggEvents = trajectory.emptyEvents();
   const aggTools: Record<string, number> = {};
   const aggToolCalls: Record<string, number> = {};
@@ -816,6 +818,7 @@ function loadSources(opts: ReportOptions = {}): Sources {
       if (t.stepToolArgs && Object.keys(t.stepToolArgs).length) stepToolArgsById.set(id, t.stepToolArgs);
       if (t.stepContext && Object.keys(t.stepContext).length) stepCtxById.set(id, { byStep: t.stepContext, window: t.contextWindow ?? null, post: t.postCompaction || {} });
       if ((t.compactions && t.compactions.length) || t.prunes) compactionsById.set(id, { events: t.compactions || [], prunes: t.prunes || 0, prunedTokens: t.prunedTokens || 0 });
+      if (t.p2p || t.p2pMentions) p2pById.set(id, { p2p: !!t.p2p, mentions: t.p2pMentions || 0 });
     }
     const s1 = trajectory.parseStatsSnapshot();
     traj.cache = { hits: s1.cacheHits - s0.cacheHits, recomputed: s1.recomputed - s0.recomputed };
@@ -829,7 +832,7 @@ function loadSources(opts: ReportOptions = {}): Sources {
 
   const contrib = buildContrib(pc, timelines, usageById, defaultModel);
   const byModel = aggregateContrib(contrib);
-  return { dshHome, sessionsRoot, storePath, storeKind, priceCfg, pc, traj, defaultModel, contrib, byModel, eventsById, toolsById, toolCallsById, toolCallArgsById, stepToolArgsById, stepToolsById, usageById, stepCtxById, compactionsById, aggEvents, aggTools, aggToolCalls };
+  return { dshHome, sessionsRoot, storePath, storeKind, priceCfg, pc, traj, defaultModel, contrib, byModel, eventsById, toolsById, toolCallsById, toolCallArgsById, stepToolArgsById, stepToolsById, usageById, stepCtxById, compactionsById, p2pById, aggEvents, aggTools, aggToolCalls };
 }
 
 /** What-if candidates: the user-chosen local baseline first, then every non-local model in the user's table. */
@@ -1110,6 +1113,10 @@ interface SessionBreakdownRow {
   /** Per-compaction detail (existence + impact + the banner anchor). Used to draw
     *  the COMPACTED rows in the step table; the summary text is fetched lazily. */
   compactionEvents: CompactionLite[];
+  /** P2P (GPU peer-to-peer) enablement evidence found in this session's trajectory. */
+  p2p: boolean;
+  /** How many times "p2p" / "peer-to-peer" appears in the trajectory text. */
+  p2pMentions: number;
 }
 
 /**
@@ -1119,7 +1126,7 @@ interface SessionBreakdownRow {
  * - byDay:     aggregate by local calendar day.
  */
 export function buildBreakdown(opts: ReportOptions = {}) {
-  const { dshHome, pc, traj, defaultModel, contrib, byModel, eventsById, toolsById, toolCallsById, toolCallArgsById, stepToolArgsById, stepToolsById, usageById, stepCtxById, compactionsById, aggEvents, aggTools, aggToolCalls } = loadSources(opts);
+  const { dshHome, pc, traj, defaultModel, contrib, byModel, eventsById, toolsById, toolCallsById, toolCallArgsById, stepToolArgsById, stepToolsById, usageById, stepCtxById, compactionsById, p2pById, aggEvents, aggTools, aggToolCalls } = loadSources(opts);
   const archivedIds = readArchivedSessions(dshHome);
   const contribById = new Map(contrib.map((c) => [c.id, c]));
   const fallbackLabel = "Qwen 3.8 27B (local)";
@@ -1334,6 +1341,8 @@ export function buildBreakdown(opts: ReportOptions = {}) {
           afterTurn: ev.afterTurn,
           afterStep: ev.afterStep,
         })),
+        p2p: (p2pById.get(s.id) || {}).p2p || false,
+        p2pMentions: (p2pById.get(s.id) || {}).mentions || 0,
       };
     });
 

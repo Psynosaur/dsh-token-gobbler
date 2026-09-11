@@ -1,13 +1,14 @@
 // token-gobbler · client/activity.tsx
 // Settings dashboard section + the wider activity overlay (floating trigger +
 // modal) and the surface registration (apply/inject) that the host calls.
-import { CSS, NS, text, fmt, fmtC, money, fmtMs, statCard, eventChips, toolTable, segBtn, request, humanizeModel, badgeGrid } from "./core";
+import { CSS, NS, text, fmt, fmtC, money, fmtMs, statCard, eventChips, toolTable, segBtn, request, humanizeModel, badgeGrid, thL, thR, tdL, tdR } from "./core";
 import { SessionTable } from "./session-table";
 import { aggregateSessions, daySeries as buildDaySeries, dayStr } from "./agg";
 import { perfDrawer, tokenTreeDrawer, combinedDrawer, Collapse, TokenSpendChart } from "./drawers";
 import { AmBarChart } from "./amchart";
 import { realModelTable, perfModelTable, perfSessionTable, comparisonTable, sessionTable, dayTable, pricingTab, costCard, costModelTable } from "./panels";
 import { DailyTab } from "./daily";
+import { RunsTab } from "./runs";
 import { useGobblerData, activityRef } from "./hooks";
 
 export function TokenGobblerSettings(props: any) {
@@ -448,7 +449,8 @@ export function TokenGobblerModal({ onClose, initialTab, initialDay }: { onClose
         ]}),
       ]});
     })();
-    body = tab === "events" ? eventsTab : tab === "cost" ? costTab : tab === "models" ? modelsTab : tab === "performance" ? performanceTabEl : tab === "tokens" ? tokensTab : tab === "combined" ? combined : tab === "daily" ? jsx(DailyTab, { bySession, initialDay }) : tab === "pricing" ? pricingTabEl : sessionsTab;
+    const runsTab = jsx(RunsTab, { bySession });
+    body = tab === "events" ? eventsTab : tab === "cost" ? costTab : tab === "models" ? modelsTab : tab === "performance" ? performanceTabEl : tab === "tokens" ? tokensTab : tab === "combined" ? combined : tab === "runs" ? runsTab : tab === "daily" ? jsx(DailyTab, { bySession, initialDay }) : tab === "pricing" ? pricingTabEl : sessionsTab;
   }
 
   return jsxs("div", { className: "tg-modal-overlay", role: "presentation", children: [
@@ -466,7 +468,7 @@ export function TokenGobblerModal({ onClose, initialTab, initialDay }: { onClose
         ]}),
       ]}),
       reprocessMsg ? jsx("div", { className: "tg-faint", style: { fontSize: 11, padding: "0 20px 10px" }, children: reprocessMsg }) : null,
-      jsx("div", { className: "tg-seg", style: { margin: "0 20px 16px" }, children: [segBtn(tab, setTab, "events", "Events"), segBtn(tab, setTab, "cost", "Cost"), segBtn(tab, setTab, "models", "Models"), segBtn(tab, setTab, "performance", "Performance"), segBtn(tab, setTab, "tokens", "Tokens"), segBtn(tab, setTab, "combined", "Combined (wip)"), segBtn(tab, setTab, "daily", "Daily"), segBtn(tab, setTab, "sessions", "Sessions"), segBtn(tab, setTab, "pricing", "Pricing")] }),
+      jsx("div", { className: "tg-seg", style: { margin: "0 20px 16px" }, children: [segBtn(tab, setTab, "events", "Events"), segBtn(tab, setTab, "cost", "Cost"), segBtn(tab, setTab, "models", "Models"), segBtn(tab, setTab, "performance", "Performance"), segBtn(tab, setTab, "tokens", "Tokens"), segBtn(tab, setTab, "combined", "Combined (wip)"), segBtn(tab, setTab, "runs", "Runs"), segBtn(tab, setTab, "daily", "Daily"), segBtn(tab, setTab, "sessions", "Sessions"), segBtn(tab, setTab, "pricing", "Pricing")] }),
       jsx("div", { className: "tg-modal-body", children: body }),
     ]}),
   ]});
