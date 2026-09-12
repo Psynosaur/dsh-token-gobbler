@@ -52,9 +52,12 @@ export const DailyTab = ({ bySession, initialDay }: { bySession: any[]; initialD
     if (next && overRef.current) overRef.current.scrollIntoView({ behavior: "smooth", block: "start" });
   };
 
-  // Sessions that carry per-step data (the drawer's turn → step table needs it).
+  // Keep every session in the Daily table, including sessions that only have
+  // projection/rollup data. Those sessions are already included in the totals;
+  // filtering them here made today's table show only the few sessions with a
+  // parsed per-step trajectory (while the token totals continued to grow).
   const selRows = React.useMemo(() => {
-    const rows = (bySession || []).filter((s) => s.stepTree && s.stepTree.length);
+    const rows = bySession || [];
     return selDay ? rows.filter((s) => s.date === selDay) : rows;
   }, [bySession, selDay]);
 
