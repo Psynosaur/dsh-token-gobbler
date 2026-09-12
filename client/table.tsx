@@ -76,8 +76,13 @@ export const TgTable = (opts: TgTableOpts) => {
     if (!open) return [rowEl];
     return [rowEl, jsx("tr", { className: "tg-drawer-row", children: jsx("td", { className: "tg-drawer-cell", colSpan, children: drawer!(r) }) }, key + "-drawer")];
   };
-  return jsxs("div", { className: "tg-tscroll", children: [
-    jsxs("table", { className: "tg-table tg-sticky", style: hasDrawer ? { tableLayout: "fixed", width: "100%" } : undefined, children: [
+  const openRow = hasDrawer && expandedId != null;
+  return jsxs("div", { className: "tg-tscroll" + (openRow ? "" : " tg-vscroll"), children: [
+    // Sticky headers only make sense while the list itself scrolls; with a drawer
+    // open the row is split by that drawer, so a pinned header would hover over
+    // the drawer's content. Drop the sticky class in that state (the container is
+    // also no longer height-bounded, so nothing escapes into the modal body).
+    jsxs("table", { className: "tg-table" + (openRow ? "" : " tg-sticky"), style: hasDrawer ? { tableLayout: "fixed", width: "100%" } : undefined, children: [
       jsx("tr", { children: [ hasDrawer ? thL("") : null, ...columns.map((c) => c.align === "r" ? thR(c.label) : thL(c.label)) ] }),
       ...groups.flatMap((g) => g.label ? [jsx("tr", { className: "tg-group", children: jsx("td", { colSpan, children: g.label }) }, g.label + "-g")] : []),
       ...pageRows.flatMap(renderRow),

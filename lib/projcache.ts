@@ -179,10 +179,8 @@ function readDirStore(storePath: string): Record<string, ProjEntry> {
   return out;
 }
 
-/**
- * Read + aggregate the projection store. Accepts either the new directory store or the
- * old single-file store. Never throws on a missing/empty store.
- */
+/** Read + aggregate the projection store. Accepts either the new directory store or the
+ *  old single-file store. Never throws on a missing/empty store. */
 export function readProjcache(storePath: string): ProjcacheResult {
   let entries: Record<string, ProjEntry> = {};
   try {
@@ -193,18 +191,60 @@ export function readProjcache(storePath: string): ProjcacheResult {
       entries = store?.tables?.sessions || {};
     }
   } catch { return { sessions: [], totals: emptyBuckets(), count: 0, nonZero: 0, error: "unreadable" }; }
+  return aggregateEntries(entries);
+}
 
+/** Store paths that may each hold a different SUBSET of the sessions. */
+export interface ProjStorePaths {
+  /** Preferred store (the directory of per-session files when it exists). */
+  primary: string;
+  /** The other store (the legacy single-file store), when it exists. */
+  secondary?: string | null;
+}
+
+/**
+ * Read BOTH projection stores and union the sessions by id, the primary store
+ * winning on a duplicate. DSH writes a session to whichever store matches the
+ * session's on-disk format: a v0 session updates the legacy single JSON file,
+ * while a v3 session is written as its own file under `session_projcache/`.
+ * They therefore hold DISJOINT sets for the sessions of each era (a v3 session is
+ * absent from the legacy file entirely). Reading only the more recently modified
+ * store silently drops the other era's sessions — which is how "today's new
+ * entries" vanish from the dashboard.
+ */
+export function readProjcacheMerged(paths: ProjStorePaths): ProjcacheResult & { from: string[] } {
+  const merged: Record<string, ProjEntry> = {};
+  const from: string[] = [];
+  for (const p of [paths.primary, paths.secondary]) {
+    if (!p) continue;
+    let entries: Record<string, ProjEntry> | null = null;
+    try {
+      if (statSync(p).isDirectory()) entries = readDirStore(p);
+      else entries = (JSON.parse(readFileSync(p, "utf8")) as { tables?: { sessions?: Record<string, ProjEntry> } })?.tables?.sessions || {};
+    } catch { entries = null; }
+    if (!entries) continue;
+    let added = 0;
+    for (const [id, entry] of Object.entries(entries)) {
+      if (merged[id]) continue; // the preferred store wins on a duplicate
+      merged[id] = entry;
+      added++;
+    }
+    if (added) from.push(p);
+  }
+  return { ...aggregateEntries(merged), from };
+}
+
+/** Aggregate raw store entries into report rows (shared by both readers). */
+function aggregateEntries(entries: Record<string, ProjEntry>): ProjcacheResult {
   const sessions: ProjSession[] = [];
   const totals = emptyBuckets();
   let nonZero = 0;
-
   for (const [id, entry] of Object.entries(entries)) {
     const s = extractSession(id, entry);
     if (s.allTokens > 0) nonZero++;
     if (s.buckets) for (const k of ["uncachedInputTokens", "outputTokens", "cacheReadTokens", "cacheWriteTokens"] as const) totals[k] += s.buckets[k];
     sessions.push(s);
   }
-
   sessions.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
   return { sessions, totals, count: sessions.length, nonZero };
 }

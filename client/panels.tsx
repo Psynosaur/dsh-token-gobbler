@@ -7,8 +7,9 @@ import { fmt, fmtC, money, fmtMs, thL, thR, tdL, tdR, humanizeModel } from "./co
 import { TgTable } from "./table";
 import { sessionCostColumns } from "./session-table";
 import { sessionDrawer } from "./drawers";
+import { AmBarChart } from "./amchart";
 
-export const realModelTable = (byModel: any[]) => jsx("div", { className: "tg-tscroll", children: jsxs("table", { className: "tg-table tg-sticky", children: [
+export const realModelTable = (byModel: any[]) => jsx("div", { className: "tg-tscroll tg-vscroll", children: jsxs("table", { className: "tg-table tg-sticky", children: [
   jsx("tr", { children: [thL("Model"), thL("Kind"), thR("Sessions"), thR("In"), thR("Out"), thR("CacheR"), thR("Speed"), thR("Cost")] }),
   ...(byModel || []).map((m) => jsxs("tr", {
     className: "tg-tr",
@@ -25,7 +26,7 @@ export const realModelTable = (byModel: any[]) => jsx("div", { className: "tg-ts
   }, m.model)),
 ]})});
 
-export const perfModelTable = (rows: any[]) => jsx("div", { className: "tg-tscroll", children: jsxs("table", { className: "tg-table tg-sticky", children: [
+export const perfModelTable = (rows: any[]) => jsx("div", { className: "tg-tscroll tg-vscroll", children: jsxs("table", { className: "tg-table tg-sticky", children: [
   jsx("tr", { children: [thL("Model"), thL("Kind"), thR("Steps"), thR("Streamed"), thR("Decode"), thR("New ctx"), thR("Prefill"), thR("Avg TTFT"), thR("Avg context")] }),
   ...(rows || []).map((m) => jsxs("tr", {
     className: "tg-tr",
@@ -70,7 +71,7 @@ export const costModelTable = (rows: any[]) => {
   const avgTtft = tot.prefillSteps > 0 ? Math.round(tot.prefillMs / tot.prefillSteps) : null;
   const rt = (tot.decodeMs + tot.prefillMs) > 0 ? (tot.decodeMs + tot.prefillMs) : null;
   const cstyle: any = { fontWeight: 700, color: "#f8fafc" };
-  return jsx("div", { className: "tg-tscroll", children: jsxs("table", { className: "tg-table tg-sticky", children: [
+  return jsx("div", { className: "tg-tscroll tg-vscroll", children: jsxs("table", { className: "tg-table tg-sticky", children: [
     jsx("tr", { children: [
       thL("Model"), thL("Kind"), thR("Sessions · Steps"), thR("In"), thR("Out"), thR("Think"), thR("Cache"), thR("Cost"), thR("Run time"), thR("Decode"), thR("Prefill"), thR("Avg TTFT"),
     ] }),
@@ -113,7 +114,7 @@ export const costModelTable = (rows: any[]) => {
 
 export const perfSessionTable = (rows: any[]) => {
   if (!rows || !rows.length) return jsx("div", { className: "tg-muted", style: { fontSize: 13, padding: "8px 4px" }, children: "No per-step timing recorded yet — only sessions with per-turn usage carry speed data." });
-  return jsx("div", { className: "tg-tscroll", children: jsxs("table", { className: "tg-table tg-sticky", children: [
+  return jsx("div", { className: "tg-tscroll tg-vscroll", children: jsxs("table", { className: "tg-table tg-sticky", children: [
     jsx("tr", { children: [thL("Date"), thL("Session"), thL("Model"), thL("Kind"), thR("Steps"), thR("Decode"), thR("Prefill"), thR("Avg TTFT")] }),
     ...rows.flatMap((s: any) => s.models.map((m: any) => jsxs("tr", {
       className: "tg-tr",
@@ -137,21 +138,29 @@ export const perfSessionTable = (rows: any[]) => {
   ]})});
 };
 
-export const comparisonTable = (comparison: any[]) => jsx("div", { className: "tg-tscroll", children: jsxs("table", { className: "tg-table tg-sticky", children: [
-  jsx("tr", { children: [thL("Model"), thR("$/M in"), thR("$/M out"), thR("$/M cacheR"), thR("Cost"), thR("You save")] }),
-  ...(comparison || []).map((c) => jsxs("tr", {
-    className: "tg-tr",
-    style: c.baseline ? { background: "rgba(16,185,129,0.06)" } : undefined,
-    children: [
-      tdL(c.label + (c.estimated ? " (est.)" : ""), { style: { maxWidth: 240, whiteSpace: "normal", wordBreak: "break-word", fontWeight: c.baseline ? 700 : 600, color: c.baseline ? "#34d399" : undefined } }),
-      tdR(c.pricing ? String(c.pricing.input) : "—"),
-      tdR(c.pricing ? String(c.pricing.output) : "—"),
-      tdR(c.pricing ? String(c.pricing.cacheRead) : "—"),
-      tdR(c.priced ? money(c.cost) : "unpriced", { style: { fontWeight: 700, color: c.priced ? "#f8fafc" : "#fbbf24" } }),
-      tdR(c.baseline ? "baseline" : (c.savings != null ? money(c.savings) : "—"), { style: { fontWeight: 700, color: c.baseline ? "#64748b" : "#34d399" } }),
-    ],
-  }, c.id)),
-]})});
+export const comparisonTable = (comparison: any[]) => {
+  // Sort by cost descending, show top 10 most expensive (baseline always shown)
+  const rows = comparison || [];
+  const baseline = rows.find((c) => c.baseline);
+  const others = rows.filter((c) => !c.baseline);
+  others.sort((a, b) => (b.cost ?? 0) - (a.cost ?? 0));
+  const shown = baseline ? [baseline, ...others.slice(0, 9)] : others.slice(0, 10);
+  return jsx("div", { className: "tg-tscroll tg-vscroll", children: jsxs("table", { className: "tg-table tg-sticky", children: [
+    jsx("tr", { children: [thL("Model"), thR("$/M in"), thR("$/M out"), thR("$/M cacheR"), thR("Cost"), thR("You save")] }),
+    ...shown.map((c) => jsxs("tr", {
+      className: "tg-tr",
+      style: c.baseline ? { background: "rgba(16,185,129,0.06)" } : undefined,
+      children: [
+        tdL(c.label + (c.estimated ? " (est.)" : ""), { style: { maxWidth: 240, whiteSpace: "normal", wordBreak: "break-word", fontWeight: c.baseline ? 700 : 600, color: c.baseline ? "#34d399" : undefined } }),
+        tdR(c.pricing ? String(c.pricing.input) : "—"),
+        tdR(c.pricing ? String(c.pricing.output) : "—"),
+        tdR(c.pricing ? String(c.pricing.cacheRead) : "—"),
+        tdR(c.priced ? money(c.cost) : "unpriced", { style: { fontWeight: 700, color: c.priced ? "#f8fafc" : "#fbbf24" } }),
+        tdR(c.baseline ? "baseline" : (c.savings != null ? money(c.savings) : "—"), { style: { fontWeight: 700, color: c.baseline ? "#64748b" : "#34d399" } }),
+      ],
+    }, c.id)),
+  ]}) });
+};
 
 // Sessions / Cost-by-session table: the shared session columns (buckets + cost)
 // on the generic TgTable — paging off, expand → sessionDrawer.
@@ -165,7 +174,7 @@ export const sessionTable = (bySession: any[], openId: string | null, onToggle: 
   rowClass: (s: any) => (s.archived ? "tg-archived" : ""),
 });
 
-export const dayTable = (byDay: any[]) => jsx("div", { className: "tg-tscroll", children: jsxs("table", { className: "tg-table tg-sticky", children: [
+export const dayTable = (byDay: any[]) => jsx("div", { className: "tg-tscroll tg-vscroll", children: jsxs("table", { className: "tg-table tg-sticky", children: [
   jsx("tr", { children: [thL("Day"), thR("Sessions"), thR("Input"), thR("Output"), thR("Cache read"), thR("Cache write"), thR("Total"), thR("Cost")] }),
   ...(byDay || []).map((d) => jsxs("tr", { className: "tg-tr", children: [
     tdL(d.date, { style: { fontWeight: 600 } }),
@@ -178,6 +187,70 @@ export const dayTable = (byDay: any[]) => jsx("div", { className: "tg-tscroll", 
     tdR(d.cost != null ? money(d.cost) : "—", { style: { fontWeight: 600, color: "#fde68a" } }),
   ] }, d.date)),
 ]})});
+
+export const dayChart = (byDay: any[]) => {
+  // Sort by date descending (most recent first)
+  const sorted = [...(byDay || [])].sort((a, b) => b.date.localeCompare(a.date));
+  return jsx(AmBarChart, {
+    data: sorted,
+    categoryField: "date",
+    kind: "column",
+    unit: "USD",
+    series: [{ key: "cost", label: "Cost", color: "#fbbf24", unit: "USD" }],
+    height: 200,
+  });
+};
+
+// The session's activity timestamp (ms): last prompt when it is later than the
+// creation time, else the creation time — the same anchor lib/report.ts uses to
+// bucket a session onto a calendar day.
+const sessionTime = (s: any): number | null => {
+  const rawLast = s.meta && s.meta.lastPromptAt != null ? s.meta.lastPromptAt : null;
+  const last = typeof rawLast === "string" ? Date.parse(rawLast) : rawLast;
+  const created = typeof s.createdAt === "number" ? s.createdAt : null;
+  const ms = last != null && created != null && last > created ? last : (created != null ? created : last);
+  return ms != null && isFinite(ms) ? ms : null;
+};
+// "MM-DD HH:MM" — the date plus its hour slot. The minute keeps every session
+// bar on its own category slot (amCharts collapses duplicate categories, which
+// would overlap two sessions started in the same hour).
+const slotLabel = (s: any): string => {
+  const ms = sessionTime(s);
+  if (ms == null) return s.date || "unknown";
+  const d = new Date(ms);
+  const p = (n: number) => String(n).padStart(2, "0");
+  return p(d.getMonth() + 1) + "-" + p(d.getDate()) + " " + p(d.getHours()) + ":" + p(d.getMinutes());
+};
+
+export const sessionChart = (bySession: any[]) => {
+  // Newest → oldest so the LATEST activity sits at the LEFT edge of the plot,
+  // matching the Cost-by-day chart beside it; sessions with no timestamp fall
+  // back to their date string.
+  const rows = (bySession || [])
+    .map((s: any) => ({ s, ms: sessionTime(s) }))
+    .sort((a: any, b: any) => {
+      if (a.ms != null && b.ms != null) return b.ms - a.ms;
+      return String(b.s.date || "").localeCompare(String(a.s.date || ""));
+    });
+  // Sum any sessions sharing the exact same slot label so the bars never collide.
+  const bySlot = new Map<string, { label: string; cost: number }>();
+  for (const r of rows) {
+    const label = slotLabel(r.s);
+    const e = bySlot.get(label);
+    if (e) e.cost += r.s.cost ?? 0;
+    else bySlot.set(label, { label, cost: r.s.cost ?? 0 });
+  }
+  const data = [...bySlot.values()];
+  return jsx(AmBarChart, {
+    data: data,
+    categoryField: "label",
+    kind: "column",
+    unit: "USD",
+    columnWidth: 42,
+    series: [{ key: "cost", label: "Cost", color: "#fbbf24", unit: "USD" }],
+    height: 200,
+  });
+};
 
 export const costCard = (label: string, value: any, sub: any, color: string) => jsxs("div", { className: "tg-card tg-stat", children: [
   jsxs("div", { style: { display: "flex", alignItems: "center", gap: 7 }, children: [

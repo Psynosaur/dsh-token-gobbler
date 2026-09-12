@@ -39,6 +39,7 @@ export type AmChartProps = {
   kind?: "column" | "line" | "area" | "scatter"; // "column" (default) = bars; "line" = strokes; "area" = filled + stacked when stacked; "scatter" = dots on two numeric axes
   horizontal?: boolean;   // true = bars run left→right (category on Y, value on X); good for long labels (model names)
   hideCategoryLabels?: boolean; // true = drop the category axis labels + grid (reclaims that gutter for the bars; hover tooltip still names each category)
+  columnWidth?: number;   // percent width of each column (default 60; stacked default 90) — smaller = thinner bars
   stacked?: boolean;      // stack series (columns stack; area layers stack)
   smooth?: boolean;       // smooth line/area curves instead of straight segments
   log?: boolean;          // logarithmic value axis — use when series span orders of magnitude (e.g. cache ~600K vs in/out ~1K)
@@ -612,7 +613,7 @@ export const AmBarChart = (props: AmChartProps) => {
         } catch (_) { /* ignore */ }
         ser.set("tooltip", tt);
         if (isCol) {
-          ser.columns.template.set(horizontal ? "height" : "width", am5.percent(props.stacked ? 90 : 60));
+          ser.columns.template.set(horizontal ? "height" : "width", am5.percent(props.columnWidth != null ? props.columnWidth : (props.stacked ? 90 : 60)));
         }
         ser.data.setAll(s.data || props.data);
       }

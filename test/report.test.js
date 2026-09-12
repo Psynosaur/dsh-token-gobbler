@@ -1100,3 +1100,54 @@ test("savePricing/loadPricing: baselineModel round-trip + drives the comparison 
   assert.throws(() => savePricing(home, { referenceModel: "claude-opus-4.6", baselineModel: "nope", models }), /baselineModel must be one of/);
 });
 
+
+// ── projection-store era split (v0 -> legacy file, v3 -> directory store) ────
+// DSH writes a v0 session to the legacy single JSON file and a v3 session as its
+// own file under session_projcache/. Both stores are live at once and hold
+// DISJOINT session sets, so reading only the more recently modified one silently
+// dropped the other era's sessions ("today's entries are missing"). The report
+// must merge them, with the directory store winning on a duplicate id.
+test("resolvePaths + buildBreakdown: merges BOTH projection stores (v0 file + v3 dir)", () => {
+  const home = mkdtempSync(join(tmpdir(), "tg-stores-"));
+  mkdirSync(join(home, "storages", "session_projcache", "sessions"), { recursive: true });
+  mkdirSync(join(home, "sessions", "--x--"), { recursive: true });
+
+  const traj = (id, steps) => {
+    const rows = [{ type: "session", version: 3, id, cwd: "/x" }];
+    for (let i = 1; i <= steps; i++) {
+      rows.push({ type: "step/start", seq: i * 2, time: 1000 + i * 1000, data: { turn: 1, step: i } });
+      rows.push({ type: "step/end", seq: i * 2 + 1, time: 1500 + i * 1000, data: { turn: 1, step: i } });
+    }
+    return Buffer.from(rows.map((r) => JSON.stringify(r)).join("\n") + "\n", "utf8");
+  };
+  const dir = join(home, "sessions", "--x--", "session-v3only");
+  const dir2 = join(home, "sessions", "--x--", "session-both");
+  mkdirSync(dir, { recursive: true });
+  mkdirSync(dir2, { recursive: true });
+  writeFileSync(join(dir, "session.v3.jsonl.zstd"), zstdCompressSync(traj("session-v3only", 3)));
+  writeFileSync(join(dir2, "session.v3.jsonl.zstd"), zstdCompressSync(traj("session-both", 2)));
+
+  const row = (uncached, output) => ({ identity: { createdAt: 1_700_000_000_000, cwd: "/x" }, rows: { tokenUsage: { val: { totals: { uncachedInputTokens: uncached, outputTokens: output, cacheReadTokens: 0, cacheWriteTokens: 0 } } } } });
+  // Legacy file: the old session only.
+  writeFileSync(join(home, "storages", "session_projcache.json"), JSON.stringify({ tables: { sessions: { "session-v0old": row(100, 10) } } }));
+  // Directory store: the v3 session only, plus a DIFFERENT copy of a shared id.
+  writeFileSync(join(home, "storages", "session_projcache", "sessions", "session-v3only.json"), JSON.stringify({ version: 7, record: row(200, 20) }));
+  writeFileSync(join(home, "storages", "session_projcache", "sessions", "session-both.json"), JSON.stringify({ version: 7, record: row(300, 30) }));
+  writeFileSync(join(home, "storages", "session_projcache", "sessions", "session-shared.json"), JSON.stringify({ version: 7, record: row(900, 90) }));
+  writeFileSync(join(home, "storages", "session_projcache.json"), JSON.stringify({ tables: { sessions: { "session-v0old": row(100, 10), "session-shared": row(111, 11) } } }));
+
+  const rp = resolvePaths({ dshHome: home });
+  assert.equal(rp.storeKind, "dir", "the directory store is the primary");
+  assert.ok(rp.otherStorePath && rp.otherStorePath.endsWith("session_projcache.json"), "the legacy file is the merge secondary");
+
+  const pc = readProjcache(rp.storePath);
+  assert.ok(!pc.sessions.some((s) => s.id === "session-v0old"), "the legacy file alone misses the legacy-only session");
+
+  const bd = buildBreakdown({ dshHome: home });
+  const ids = bd.bySession.map((s) => s.id);
+  assert.ok(ids.includes("session-v0old"), "the legacy-only session survives the merge");
+  assert.ok(ids.includes("session-v3only"), "the v3-only session (never in the legacy file) now appears");
+  assert.equal(ids.filter((i) => i === "session-shared").length, 1, "a shared id is not double-counted");
+  const shared = bd.bySession.find((s) => s.id === "session-shared");
+  assert.equal(shared.uncachedInputTokens, 900, "the directory store's copy wins on a duplicate");
+});

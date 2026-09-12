@@ -21,6 +21,45 @@
 //
 // NOTE: aux calls (session/title-llm-request, etc.) are NOT in the timeline — they are
 // not part of the agent step loop and their tokens are negligible.
+//
+// ── FORMAT VERSIONS ─────────────────────────────────────────────────────────
+// DSH has shipped two on-disk trajectory shapes. Both are JSONL over multi-frame
+// zstd; the difference is where the streaming/usage signal lives and what the
+// `session` header says.
+//
+//   version 0 — file `session.jsonl.zstd` (older sessions; kept on disk)
+//     · stream records are TOP-LEVEL records, one per chunk:
+//         { type:"assistant/chunk", time, data:{ turn, step, chunk:{ type:"usage"|"finish"|… } } }
+//         { type:"text-chunks",      time0, data:{ turn, step, index, dt, texts } }
+//         { type:"tool-call-chunks", time0, data:{ turn, step, index, dt, args } }
+//         { type:"reasoning-chunks", time0, data:{ turn, step, index, dt, texts } }
+//     · per-step usage+timing comes from those records; per-step tokens live in
+//       `chunk.usage`; `chunk.finish` carries `replayState.response.{provider,model}`.
+//
+//   version 3 — file `session.v3.jsonl.zstd` (current; written since 2026-09-11)
+//     · the same stream is NESTED inside each assistant message, flattened one level:
+//         { type:"assistant/message", time, data:{ turn, step, message,
+//             usage:{ inputTokens, outputTokens, totalTokens, cacheReadTokens, reasoningTokens },
+//             stream:[ { type:"chunk", time, chunk:{ type:"block-start"|"usage"|"finish", … } },
+//                      { type:"text-chunks",      time0, index, dt, texts },
+//                      { type:"tool-call-chunks", time0, index, dt, id, name, args },
+//                      { type:"reasoning-chunks", time0, index, dt, texts } ] } }
+//     · NO top-level `assistant/chunk` / `*-chunks` records exist any more.
+//     · `data.usage` mirrors the stream's usage chunk — the authoritative per-step
+//       token source (and the only one, since `finish` has no replayState in v3).
+//     · the system prompt moved out of `request/header.header.system` into a
+//       `system/message` record (v3 `request/header` carries `header.tools` only).
+//     · new record type `system/message`; header `version:3` + `isSeeded`.
+//
+// Version 0 and version 3 are parsed by ONE pass: record handlers below dispatch on
+// type, and the v3 nested stream is replayed through the same chunk handlers the v0
+// top-level records use (see processStream). A session directory may hold BOTH
+// files (DSH re-encodes a live v0 session as v3 without deleting the old one);
+// findTrajectoryFiles prefers the v3 file when both exist.
+//
+// The SHAPE of whatever we actually read is captured on every parse (see
+// ParsedTrajectory.shape / shape.ts) so a future format change is detectable by
+// diffing snapshots (npm run report:shape) instead of silently zeroing the numbers.
 
 import { zstdDecompressSync } from "node:zlib";
 import { readFileSync, readdirSync, statSync, mkdirSync, writeFileSync, renameSync, existsSync } from "node:fs";
@@ -62,11 +101,14 @@ interface Data {
   message?: any;
   header?: { config?: { model?: string; provider?: string }; system?: string; tools?: unknown[] };
   chunk?: UsageChunk;
+  // v3 nested stream + its authoritative per-step usage (see FORMAT VERSIONS).
+  // `usage` is shared with compaction/summary records.
+  stream?: unknown[];
   // compaction records:
   compactionId?: string;
   summary?: unknown[];
   shadowedTokenCount?: number;
-  usage?: { inputTokens?: number; outputTokens?: number; totalTokens?: number; cacheReadTokens?: number };
+  usage?: UsageInfo & { totalTokens?: number };
   error?: string;
   // turn/end reason: { kind: "completed" | "aborted" | "blocked" | "error" | "max-tokens" | "interrupted", ... }
   reason?: { kind?: string; reason?: { kind?: string }; error?: unknown };
@@ -82,6 +124,9 @@ interface JsonRecord {
   cwd?: string | null;
   createdAt?: string | null;
   agentPreset?: string | null;
+  /** Session header: on-disk format version (0 legacy, 3 current) + seed flag (v3). */
+  version?: number;
+  isSeeded?: boolean;
   name?: string;
   arguments?: unknown;
   data?: Data;
@@ -90,15 +135,89 @@ interface JsonRecord {
 /** Activity-category counters (the event breakdown). */
 export interface EventCounts {
   steps: number; toolCalls: number; toolSubCalls: number; userMessages: number;
-  assistantMessages: number; turns: number; compactions: number; retries: number;
-  approvals: number; todos: number; commands: number; userStops: number;
+  assistantMessages: number; systemMessages: number; turns: number; compactions: number;
+  retries: number; approvals: number; todos: number; commands: number; userStops: number;
 }
+
+// ── trajectory SHAPE (format-change detection) ──────────────────────────────
+// Every parse also produces a compact, deterministic description of the records
+// it saw: which event types exist, the structure of each (keys + value types), and
+// the small closed value sets the parser depends on (chunk.type, reason.kind, …).
+// Snapshots of this shape are diffable, so when DSH changes the trajectory format
+// again the diff names the changed record instead of the numbers just going to 0.
+// See lib/shape-diff.ts for the comparison and scripts/trajectory-shape.js for the CLI.
+
+/** A structural description of one value. Objects list their keys (sorted); arrays are `[element]`. */
+export type ShapeNode = string | ShapeNode[] | { [key: string]: ShapeNode };
+
+/** The observed shape of one trajectory file. */
+export interface TrajectoryShape {
+  /** Format version from the `session` header (0 = legacy on-disk format, 3 = current). */
+  version: number | null;
+  /** Record type -> its observed shape (`{ keys:…, data:…, stream:… }`). */
+  types: Record<string, ShapeNode>;
+  /** Record type -> count of records of that type. */
+  counts: Record<string, number>;
+  /** `"parent.path.field"` -> sorted distinct scalar values (capped, for closed sets like chunk.type). */
+  valueSets: Record<string, (string | number)[]>;
+  /** Nested `assistant/message.data.stream[]` entry kinds (`"chunk:usage"`) -> count. */
+  streamKinds: Record<string, number>;
+  /** JSONL lines that did not parse as JSON (should be 0 — a signal in itself). */
+  unparsed: number;
+}
+
+/** Fields whose distinct values are worth tracking (closed vocabulary the parser keys on). */
+const VALUE_SET_PATHS = new Set([
+  "type", "version", "role", "blockType", "surfaceOp",
+  "chunk.type", "reason.kind", "reason.reason.kind", "message.source.kind", "source.kind",
+]);
+/** Upper bound on a value set (a record's `type` vocabulary is the widest at ~35). */
+const VALUE_SET_CAP = 64;
 
 /** A model-timeline change point (which provider+model became active). */
 export interface ModelChange {
   seq: number | null;
   provider: string | null;
   model: string;
+}
+
+// ── per-turn timeline (the dashboard's "what happened, in order") ───────────
+// The trajectory is the only place that records the NON-token activity: the
+// user's prompt, how each turn ended, retries, approvals, compactions, commands,
+// interruptions. This projects those records into a compact per-turn + session
+// event list, so a session drawer can show the same timeline on every tab.
+/** How a turn ended (from turn/end). */
+export type TurnStatus = "open" | "completed" | "aborted" | "blocked" | "error" | "max-tokens" | "interrupted";
+/** Event categories shown on the timeline (declaration order = display order). */
+export type TimelineKind =
+  | "session" | "prompt" | "system" | "error" | "user-stop" | "retry" | "approval"
+  | "compaction" | "prune" | "todo" | "command" | "title" | "model" | "deliverable" | "info";
+/** One non-step event, positioned by turn/step (null = session-level, before turn 1). */
+export interface TimelineEvent {
+  turn: number | null;
+  step: number | null;
+  seq: number | null;
+  time: number | null;
+  kind: TimelineKind;
+  text: string;
+}
+/** One turn's prompt/response and outcome. */
+export interface TurnDetail {
+  turn: number;
+  seq: number | null;
+  startTime: number | null;
+  endTime: number | null;
+  status: TurnStatus;
+  /** turn/end detail (the abort reason, the error text) when it did not simply complete. */
+  detail: string | null;
+  prompt: string;
+  response: string;
+  steps: number;
+}
+/** The assembled per-turn + session activity of one trajectory. */
+export interface TurnTimeline {
+  turns: TurnDetail[];
+  events: TimelineEvent[];
 }
 
 /**
@@ -198,6 +317,12 @@ export interface ParsedTrajectory {
   p2p: boolean;
   /** How many times "p2p" appears anywhere in the trajectory (mention volume). */
   p2pMentions: number;
+  /** Observed on-disk format version (0 legacy, 3 current) — null when no session header. */
+  formatVersion: number | null;
+  /** Observed record shape (format-change detection; see TrajectoryShape). */
+  shape: TrajectoryShape;
+  /** Per-turn prompt/response/outcome + the session's non-step event timeline. */
+  timeline: TurnTimeline;
 }
 
 /** Recursively find *.zstd trajectory files under a root. */
@@ -206,18 +331,159 @@ export function findTrajectoryFiles(root: string): string[] {
   const walk = (dir: string): void => {
     let entries;
     try { entries = readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    // A session directory can hold BOTH the legacy `session.jsonl.zstd` and the
+    // current `session.v3.jsonl.zstd` (DSH re-encodes a live session as v3 without
+    // deleting the old file). They describe the SAME session, so parse the v3 file
+    // and skip the legacy one — otherwise the session is parsed twice and the stale
+    // legacy copy (which stops growing) can win on ordering.
+    const names = new Set(entries.map((e) => e.name));
+    const hasV3 = names.has("session.v3.jsonl.zstd");
     for (const e of entries) {
       const full = join(dir, e.name);
       if (e.isDirectory()) {
         if (e.name === "node_modules" || e.name === ".git") continue;
         walk(full);
       } else if (e.isFile() && e.name.endsWith(".zstd")) {
+        if (hasV3 && e.name === "session.jsonl.zstd") continue;
         out.push(full);
       }
     }
   };
   try { if (statSync(root).isDirectory()) walk(root); } catch { /* missing root */ }
   return out;
+}
+
+/** Human name for an on-disk trajectory format version (see FORMAT VERSIONS). */
+export function formatVersionName(v: number | null): string {
+  if (v === null) return "unknown";
+  if (v === 0) return "v0 (legacy: top-level chunk records)";
+  if (v === 3) return "v3 (nested assistant/message stream)";
+  return "v" + v + " (unrecognized)";
+}
+
+// ── shape diff (format-change detection) ────────────────────────────────────
+/**
+ * Flatten a shape tree into sorted structural PATHS, each with the leaf type:
+ * `"data.turn:number"`, `"data.message.content:[object]"`, `"data:object"`.
+ * Depth truncation (`{…}`) is not structural, so it is normalized away — the path
+ * list is a canonical, order-independent description of a record's structure.
+ */
+export function shapePaths(node: ShapeNode, prefix = "", out: string[] = []): string[] {
+  if (typeof node === "string") {
+    // "null"/primitive, "undefined" slots, or a truncated branch ({…}/[…]) — the
+    // truncated forms carry no structure beyond their parent already recorded.
+    if (node === "undefined" || node === "{…}") return out;
+    out.push(prefix + ":" + node);
+    return out;
+  }
+  if (Array.isArray(node)) {
+    const inner = node.length ? node[0] : "";
+    if (inner === "{…}") { out.push(prefix + ":[object]"); return out; }
+    return shapePaths(inner, prefix + "[]", out);
+  }
+  const keys = Object.keys(node).filter((k) => k !== "keys");
+  if (!keys.length) { out.push(prefix + ":object"); return out; }
+  for (const k of keys) shapePaths((node as { [k: string]: ShapeNode })[k], prefix ? prefix + "." + k : k, out);
+  return out;
+}
+
+/** Canonical structural (field-path) description of one record type's shape. */
+export function canonicalShape(node: ShapeNode): string[] {
+  return [...new Set(shapePaths(node))].sort();
+}
+
+/** One difference between two snapshots of the same trajectory format. */
+export interface ShapeDiff {
+  kind: "version" | "type-added" | "type-removed" | "field-added" | "field-removed" | "values-added" | "values-removed" | "stream-kind-added" | "stream-kind-removed";
+  detail: string;
+}
+/** The structural part of a shape: record structures + value vocabularies + stream kinds. */
+const shapeSemantics = (s: TrajectoryShape): string => JSON.stringify({
+  version: s.version,
+  types: Object.fromEntries(Object.entries(s.types).sort((a, b) => a[0].localeCompare(b[0])).map(([t, n]) => [t, canonicalShape(n).join("|")])),
+  valueSets: s.valueSets,
+  streamKinds: Object.keys(s.streamKinds).sort(),
+});
+
+/**
+ * Compare two snapshots of the same format. Counts and per-session record volumes
+ * are deliberately ignored — only what the PARSER keys on differs: the format
+ * version, which record types exist, their structure, the closed value sets
+ * (chunk.type, reason.kind, …) and which nested stream entry kinds appear.
+ * An empty diff means the format did not change in any way that can break parsing.
+ */
+export function diffShape(a: TrajectoryShape, b: TrajectoryShape): ShapeDiff[] {
+  const diffs: ShapeDiff[] = [];
+  if (a.version !== b.version) diffs.push({ kind: "version", detail: `format version ${a.version} -> ${b.version}` });
+  for (const t of Object.keys(b.types)) if (!(t in a.types)) diffs.push({ kind: "type-added", detail: t });
+  for (const t of Object.keys(a.types)) if (!(t in b.types)) diffs.push({ kind: "type-removed", detail: t });
+  for (const t of Object.keys(a.types)) {
+    if (!(t in b.types)) continue;
+    const av = canonicalShape(a.types[t]);
+    const bv = canonicalShape(b.types[t]);
+    const added = bv.filter((p) => !av.includes(p));
+    const removed = av.filter((p) => !bv.includes(p));
+    if (added.length) diffs.push({ kind: "field-added", detail: `${t}: +${added.join(", +")}` });
+    if (removed.length) diffs.push({ kind: "field-removed", detail: `${t}: -${removed.join(", -")}` });
+  }
+  for (const p of new Set([...Object.keys(a.valueSets), ...Object.keys(b.valueSets)])) {
+    const av = (a.valueSets[p] || []).map(String);
+    const bv = (b.valueSets[p] || []).map(String);
+    const added = bv.filter((v) => !av.includes(v));
+    const removed = av.filter((v) => !bv.includes(v));
+    if (added.length) diffs.push({ kind: "values-added", detail: `${p}: +${added.join(", ")}` });
+    if (removed.length) diffs.push({ kind: "values-removed", detail: `${p}: -${removed.join(", ")}` });
+  }
+  for (const k of Object.keys(b.streamKinds)) if (!(k in a.streamKinds)) diffs.push({ kind: "stream-kind-added", detail: k });
+  for (const k of Object.keys(a.streamKinds)) if (!(k in b.streamKinds)) diffs.push({ kind: "stream-kind-removed", detail: k });
+  return diffs;
+}
+
+/**
+ * Fold many session shapes of the SAME format into one representative shape.
+ * Types/value-sets are unioned (a record type absent from one session still
+ * exists in the format), counts are summed, and `shapeSemantics` of the result is
+ * what a snapshot pins. `formatVersion` is taken from the majority of inputs.
+ */
+export function mergeShapes(shapes: TrajectoryShape[]): TrajectoryShape {
+  const merged: TrajectoryShape = { version: null, types: {}, counts: {}, valueSets: {}, streamKinds: {}, unparsed: 0 };
+  // For each record type keep the MOST complete example seen: a live session can
+  // catch a record mid-shape (a field not yet written), and the representative
+  // must describe the fullest form. Ties break lexicographically on the canonical
+  // path list so the merge is deterministic.
+  const betterTypes = new Map<string, { shape: ShapeNode; key: string }>();
+  const votes = new Map<number | null, number>();
+  for (const s of shapes) {
+    if (s.version !== null) votes.set(s.version, (votes.get(s.version) || 0) + 1);
+    for (const [t, node] of Object.entries(s.types)) {
+      const canon = canonicalShape(node).join("|");
+      const prior = betterTypes.get(t);
+      if (!prior || canon.length > prior.key.length || (canon.length === prior.key.length && canon > prior.key)) betterTypes.set(t, { shape: node, key: canon });
+    }
+    for (const [t, n] of Object.entries(s.counts)) merged.counts[t] = (merged.counts[t] || 0) + n;
+    for (const [p, vals] of Object.entries(s.valueSets)) {
+      const set = (merged.valueSets[p] ||= []);
+      for (const v of vals) if (set.length < VALUE_SET_CAP && !set.some((x) => x === v)) set.push(v);
+      set.sort((a, b) => String(a).localeCompare(String(b)));
+    }
+    for (const [k, n] of Object.entries(s.streamKinds)) merged.streamKinds[k] = (merged.streamKinds[k] || 0) + n;
+    merged.unparsed += s.unparsed;
+  }
+  merged.types = Object.fromEntries([...betterTypes.entries()].map(([t, v]) => [t, v.shape]));
+  let best: number | null = null; let bestN = -1;
+  for (const [v, n] of votes) if (n > bestN) { best = v; bestN = n; }
+  merged.version = best;
+  const sortKeys = <T>(o: Record<string, T>): Record<string, T> => Object.fromEntries(Object.entries(o).sort((a, b) => a[0].localeCompare(b[0])));
+  merged.types = sortKeys(merged.types);
+  merged.counts = sortKeys(merged.counts);
+  merged.valueSets = sortKeys(merged.valueSets);
+  merged.streamKinds = sortKeys(merged.streamKinds);
+  return merged;
+}
+
+/** True when two shapes describe the same format in every way the parser depends on. */
+export function sameShape(a: TrajectoryShape, b: TrajectoryShape): boolean {
+  return shapeSemantics(a) === shapeSemantics(b);
 }
 
 /**
@@ -237,6 +503,7 @@ export const EVENT_CAT: Record<string, keyof EventCounts> = {
   "tool/code-dispatch": "toolSubCalls",
   "user/message": "userMessages",
   "assistant/message": "assistantMessages",
+  "system/message": "systemMessages",
   "turn/end": "turns",
   "compaction/end": "compactions",
   "llm/retry": "retries",
@@ -245,11 +512,11 @@ export const EVENT_CAT: Record<string, keyof EventCounts> = {
   "command/done": "commands",
 };
 /** Zeroed activity-category counters. */
-export const emptyEvents = (): EventCounts => ({ steps: 0, toolCalls: 0, toolSubCalls: 0, userMessages: 0, assistantMessages: 0, turns: 0, compactions: 0, retries: 0, approvals: 0, todos: 0, commands: 0, userStops: 0 });
+export const emptyEvents = (): EventCounts => ({ steps: 0, toolCalls: 0, toolSubCalls: 0, userMessages: 0, assistantMessages: 0, systemMessages: 0, turns: 0, compactions: 0, retries: 0, approvals: 0, todos: 0, commands: 0, userStops: 0 });
 
 export function parseTrajectoryText(text: string): ParsedTrajectory {
   const lines = String(text).split("\n").filter(Boolean);
-  const out: ParsedTrajectory = { meta: null, usage: [], modelCounts: {}, modelChanges: [], stepSeqs: [], events: emptyEvents(), tools: {}, toolCalls: {}, toolCallArgs: {}, stepTools: {}, stepToolArgs: {}, decode: { tokens: 0, ms: 0, steps: 0 }, prefill: { tokens: 0, ms: 0, steps: 0 }, systemChars: 0, toolsChars: 0, contextWindow: null, stepContext: {}, compactions: [], prunes: 0, prunedTokens: 0, postCompaction: {}, p2p: false, p2pMentions: 0 };
+  const out: ParsedTrajectory = { meta: null, usage: [], modelCounts: {}, modelChanges: [], stepSeqs: [], events: emptyEvents(), tools: {}, toolCalls: {}, toolCallArgs: {}, stepTools: {}, stepToolArgs: {}, decode: { tokens: 0, ms: 0, steps: 0 }, prefill: { tokens: 0, ms: 0, steps: 0 }, systemChars: 0, toolsChars: 0, contextWindow: null, stepContext: {}, compactions: [], prunes: 0, prunedTokens: 0, postCompaction: {}, p2p: false, p2pMentions: 0, formatVersion: null, shape: { version: null, types: {}, counts: {}, valueSets: {}, streamKinds: {}, unparsed: 0 }, timeline: { turns: [], events: [] } };
   let curModel: string | null = null;
   let curProvider: string | null = null;
   // First assistant/chunk time per (turn, step) — the stream start. The usage chunk
@@ -269,8 +536,7 @@ export function parseTrajectoryText(text: string): ParsedTrajectory {
   // (coarser). We merge both to get the overall [first,last] thinking timestamp per
   // step; last-first = the time spent generating thinking. The authoritative thinking
   // TOKEN count comes from usage.reasoningTokens (see recordUsage).
-  const thinkingTimeByKey = new Map<string, { first: number; last: number }>(); // "turn:step" -> { first, last }
-  // Total thinking (reasoning) text chars per (turn, step), from the fine-grained
+  const thinkingTimeByKey = new Map<string, { first: number; last: number }>(); // "turn:step" -> { first, last }  // Total thinking (reasoning) text chars per (turn, step), from the fine-grained
   // `reasoning-chunks` stream. Used to ESTIMATE thinking tokens when the provider
   // streams thinking but reports reasoningTokens=0 (common). chars/4 tracks the
   // authoritative reasoningTokens within ~15% (calibrated).
@@ -285,11 +551,17 @@ export function parseTrajectoryText(text: string): ParsedTrajectory {
   // emits BOTH a usage chunk and a finish chunk carrying usage (recordUsage would
   // otherwise push the step twice → per-model buckets, step tree and timing double-counted).
   const usageRecordedByKey = new Set<string>();
-  const noteThinking = (stepKey: string, t: number | undefined): void => {
+  /**
+   * Extend the thinking window for a step. A batch `reasoning-chunks` record
+   * covers a whole window at once — pass its last token time (time0 + Σdt) as
+   * `end`; per-chunk reasoning deltas pass only their own timestamp.
+   */
+  const noteThinking = (stepKey: string, t: number | undefined, end?: number): void => {
     if (typeof t !== "number") return;
+    const last = typeof end === "number" && end > t ? end : t;
     const e = thinkingTimeByKey.get(stepKey);
-    if (!e) thinkingTimeByKey.set(stepKey, { first: t, last: t });
-    else { if (t < e.first) e.first = t; if (t > e.last) e.last = t; }
+    if (!e) thinkingTimeByKey.set(stepKey, { first: t, last });
+    else { if (t < e.first) e.first = t; if (last > e.last) e.last = last; }
   };
   let lastRequestTime: number | null = null;
   let lastEndedStep: string | null = null; // "turn:step" key of the most recently completed step (for tool attribution)
@@ -355,13 +627,95 @@ export function parseTrajectoryText(text: string): ParsedTrajectory {
     userMsgs.push({ id: typeof id === "string" ? id : null, seq, chars, entry: openStep });
   };
 
+  // ── per-turn + event timeline (see TurnTimeline) ───────────────────────────
+  // Built in stream order: a turn opens on turn/start, collects its prompt (the
+  // user message recorded against it), its response (assistant text), and its
+  // outcome (turn/end). `eventOf` records one timeline row; unpositioned records
+  // can be resolved to the turn that follows (like userMsgs.entry).
+  const TRUNC_PROMPT = 240;
+  const TRUNC_RESPONSE = 240;
+  const turnMap = new Map<number, TurnDetail>();
+  // (events are positioned after the parse: see the finalize pass)
+  const oneLine = (s: string, cap: number): string => {
+    const t = s.replace(/\s+/g, " ").trim();
+    return t.length > cap ? t.slice(0, cap - 1) + "…" : t;
+  };
+  /** Concatenated text blocks of a message (the human-readable part). */
+  const textOf = (content: unknown): string => {
+    if (typeof content === "string") return content;
+    if (!Array.isArray(content)) return "";
+    const parts: string[] = [];
+    for (const c of content) if (c && typeof c === "object" && (c as any).type === "text" && typeof (c as any).text === "string") parts.push((c as any).text);
+    return parts.join(" ");
+  };
+  const turnStartSeq = new Map<number, number>();
+  const turnOrder: number[] = [];
+  let activeTurn: number | null = null; // the turn currently open (last started, not yet ended)
+  const ensureTurn = (turn: number, seq: number | null, time: number | null): TurnDetail => {
+    let t = turnMap.get(turn);
+    if (!t) {
+      t = { turn, seq, startTime: time, endTime: null, status: "open", detail: null, prompt: "", response: "", steps: 0 };
+      turnMap.set(turn, t);
+      turnStartSeq.set(turn, seq ?? 0);
+      turnOrder.push(turn);
+      if (activeTurn == null || turn >= activeTurn) activeTurn = turn;
+    }
+    return t;
+  };
+  const eventOf = (e: TimelineEvent): void => { out.timeline.events.push(e); };
+  /** The turn a seq falls in: the latest turn that had started by then. */
+  const turnForSeq = (seq: number): number | null => {
+    let best: number | null = null;
+    for (const [turn, s] of turnStartSeq) if (s <= seq && (best === null || s > (turnStartSeq.get(best) ?? -1))) best = turn;
+    return best;
+  };
+  /**
+   * Observe an event. `pos` is the turn/step the record itself carries — which
+   * most v0 records and some v3 ones do NOT, so a missing turn is resolved later
+   * (after the loop) from its seq against the turn boundaries.
+   */
+  const timelineEvent = (pos: { turn?: number | null; step?: number | null }, seq: number | null, time: number | null, kind: TimelineKind, text: string): void => {
+    eventOf({ turn: pos.turn ?? null, step: pos.step ?? null, seq, time, kind, text });
+  };
+  /** Add a user prompt to the turn it was sent in (data.turn in v3, else by seq). */
+  const notePrompt = (turnOpt: number | null, seq: number, content: unknown): void => {
+    const text = oneLine(textOf(content), TRUNC_PROMPT);
+    if (!text) return;
+    const turn = turnOpt ?? turnForSeq(seq) ?? activeTurn;
+    if (turn == null) return;
+    const t = ensureTurn(turn, seq, null);
+    if (!t.prompt) t.prompt = text;
+    timelineEvent({ turn }, seq, null, "prompt", text);
+  };
+  const noteResponse = (turnOpt: number | null, content: unknown): void => {
+    // A step often emits only tool calls (no prose). Fall back to naming them, so
+    // a tool-heavy turn still shows what it did rather than an empty row.
+    let text = oneLine(textOf(content), TRUNC_RESPONSE);
+    if (!text) {
+      const names: string[] = [];
+      for (const c of (Array.isArray(content) ? content : [])) {
+        if (c && typeof c === "object" && (c as any).type === "tool-call" && typeof (c as any).name === "string") names.push(String((c as any).name));
+      }
+      if (names.length) text = oneLine("→ " + [...new Set(names)].join(", "), TRUNC_RESPONSE);
+    }
+    if (!text) return;
+    const fromStep: number | null = lastEndedStep ? Number(lastEndedStep.split(":")[0]) : null;
+    // v0 assistant/message carries no turn: fall back to the step just finished,
+    // then the turn that was opening around it (`activeTurn`), then the last turn.
+    const turn: number | null = turnOpt ?? fromStep ?? activeTurn ?? turnOrder[turnOrder.length - 1] ?? null;
+    if (turn == null) return;
+    const t = ensureTurn(turn, null, null);
+    if (!t.response) t.response = text; // the turn's opening text (the outline's one-liner)
+  };
+  const TURN_STATUS = new Set<string>(["completed", "aborted", "blocked", "error", "max-tokens", "interrupted"]);
+
   const addModelChange = (seq: number | undefined, provider: string | null | undefined, model: string): void => {
     if (!model) return;
     out.modelChanges.push({ seq: typeof seq === "number" ? seq : null, provider: provider ?? null, model });
   };
 
-  const recordUsage = (data: Data | undefined, chunk: UsageChunk, time: number | undefined): void => {
-    const u = chunk.usage;
+  const recordUsage = (data: Data | undefined, chunk: UsageChunk, time: number | undefined, usageOverride?: UsageInfo): void => {
+    const u = usageOverride ?? chunk.usage;
     if (!u) return;
     const buckets: TokenBuckets = {
       uncachedInputTokens: u.inputTokens ?? 0,
@@ -394,10 +748,144 @@ export function parseTrajectoryText(text: string): ParsedTrajectory {
     out.modelCounts[key] = (out.modelCounts[key] || 0) + 1;
   };
 
+  // Steps already recorded when a prompt-config record arrives: the request
+  // metadata (system prompt, tools definitions) is written AFTER the step/start of
+  // the step whose request it belongs to, so those steps would otherwise keep the
+  // zeroed values captured at step/start. Backfill them (both v0 and v3).
+  const backfillPromptConfig = (): void => {
+    for (const k of stepOrder) {
+      if (!sysAtStart.get(k)) sysAtStart.set(k, systemChars);
+      if (!toolsAtStart.get(k)) toolsAtStart.set(k, toolsChars);
+    }
+  };
+
+  // ── streaming chunks (shared by v0 top-level records and the v3 nested stream) ──
+  // v0 puts one chunk per top-level record; v3 nests the identical records inside
+  // assistant/message.data.stream. Both feed processStream, so the timing/usage
+  // extraction has exactly ONE implementation. `entry` is the flattened v3 shape
+  // (`chunk` plus a top-level `time`); for v0 it is the record itself.
+  interface StreamEntry { type?: string; time?: number; time0?: number; chunk?: UsageChunk; turn?: number; step?: number; texts?: unknown[]; dt?: unknown[]; index?: number; id?: string; name?: string; args?: unknown[]; }
+  // "turn:step" keys whose stream produced at least one `chunk` entry — i.e. the
+  // authoritative stream start has already been seen for that step.
+  const sawChunkByKey = new Set<string>();
+  const stepKeyOf = (turn: number | undefined, step: number | undefined): string => (turn ?? "?") + ":" + (step ?? "?");
+  /**
+   * Record the step's stream start (the TTFT/decode clock) the first time any
+   * timed signal for the step is seen. TTFT = stream start − step/start (the step
+   * being dispatched), or − the last request event on trajectories without
+   * step/start. Returns true when this time became the clock.
+   */
+  const noteStreamStart = (stepKey: string, time: number, requestTime: number | null): boolean => {
+    const had = firstChunkTime.has(stepKey);
+    if (!had) firstChunkTime.set(stepKey, time);
+    if (!ttftByKey.has(stepKey)) {
+      const stepStart = stepStartTime.get(stepKey);
+      if (typeof stepStart === "number" && time > stepStart) ttftByKey.set(stepKey, time - stepStart);
+      else if (typeof requestTime === "number" && time > requestTime) ttftByKey.set(stepKey, time - requestTime);
+    }
+    return !had;
+  };
+  const processStream = (entry: StreamEntry, stepKey: string, requestTime: number | null, turn?: number, step?: number): void => {
+    const chunk = entry.chunk;
+    if (chunk) {
+      sawChunkByKey.add(stepKey);
+      if (typeof entry.time === "number") noteStreamStart(stepKey, entry.time, requestTime);
+      if (chunk.type === "reasoning-delta") {
+        // v0 streams thinking as bare reasoning-delta chunks; v3 streams it as
+        // reasoning-chunks entries instead, so this is normally a no-op there.
+        noteThinking(stepKey, entry.time);
+        if (typeof chunk.text === "string" && chunk.text) reasoningDeltaCharsByKey.set(stepKey, (reasoningDeltaCharsByKey.get(stepKey) || 0) + chunk.text.length);
+      }
+      // turn/step come from the parent record: v0 chunks carry them in data, v3
+      // stream entries do NOT (the containing assistant/message does).
+      const ref = { turn: entry.turn ?? turn, step: entry.step ?? step };
+      if (chunk.type === "usage") recordUsage(ref, chunk, entry.time);
+      else if (chunk.type === "finish") {
+        const resp = chunk.replayState?.response; // v0: the serving model; v3 carries no replayState (see message.source)
+        if (resp?.model) { curModel = resp.model; curProvider = resp.provider ?? curProvider; }
+        if (chunk.usage) recordUsage(ref, chunk, entry.time); // some shapes carry usage on the finish chunk
+      }
+      return;
+    }
+    // Flattened batch records: text-chunks / tool-call-chunks / reasoning-chunks.
+    // `time0` is the first token's time and `dt[i]` the gap before token i, so
+    // time0 + Σdt is the LAST token's time — an exact per-segment window (used for
+    // thinking duration) without depending on the surrounding record times. It is
+    // also the earliest first-token evidence, so it can start the stream clock —
+    // but ONLY when this step emitted no block-start chunk: by the time a `chunk`
+    // entry has been seen, the authoritative stream start is already recorded, and
+    // a batch record that arrives afterwards must not move the clock.
+    if (typeof entry.time0 === "number") {
+      const texts = Array.isArray(entry.texts) ? entry.texts : [];
+      if (entry.type === "reasoning-chunks" && texts.length) {
+        // time0 + Σdt = the last thinking token's time — the window's end.
+        let sum = 0;
+        if (Array.isArray(entry.dt)) for (const d of entry.dt) if (typeof d === "number") sum += d;
+        noteThinking(stepKey, entry.time0, entry.time0 + sum);
+        let n = 0;
+        for (const t of texts) if (typeof t === "string") n += t.length;
+        if (n) reasoningCharsByKey.set(stepKey, (reasoningCharsByKey.get(stepKey) || 0) + n);
+      }
+      if (!sawChunkByKey.has(stepKey)) noteStreamStart(stepKey, entry.time0, requestTime);
+    }
+  };
+
+  // ── out.shape accumulation (see the FORMAT/SHAPE sections at the top) ──────
+  const shape = out.shape;
+  const shapeOf = (v: unknown, depth: number): ShapeNode => {
+    if (v === null) return "null";
+    if (Array.isArray(v)) return "[" + (v.length ? String(shapeOf(v[0], depth + 1)) : "") + "]";
+    const t = typeof v;
+    if (t !== "object") return t;
+    if (depth >= 3) return "{…}";
+    const o = v as Record<string, unknown>;
+    const keys = Object.keys(o).sort();
+    const built: { [k: string]: ShapeNode } = {};
+    for (const k of keys) {
+      const s = shapeOf(o[k], depth + 1);
+      if (s !== "undefined") built[k] = s;
+    }
+    return keys.length ? { keys: keys.join(","), ...built } : { keys: "" };
+  };
+  const recordValueSets = (v: unknown, path: string): void => {
+    if (VALUE_SET_PATHS.has(path) && v != null && typeof v !== "object") {
+      const set = (shape.valueSets[path] ||= []);
+      if (set.length < VALUE_SET_CAP && !set.some((x) => x === (v as string | number))) {
+        set.push(v as string | number);
+        set.sort((a, b) => String(a).localeCompare(String(b)));
+      }
+    }
+    if (v !== null && typeof v === "object") {
+      for (const [k, child] of Object.entries(v as Record<string, unknown>)) {
+        if (path === "data" && k === "stream") continue; // the v3 stream is summarized via streamKinds, not per-entry
+        recordValueSets(child, path ? path + "." + k : k);
+      }
+    }
+  };
+  const noteRecord = (r: JsonRecord): void => {
+    const type = r.type || "(no type)";
+    shape.counts[type] = (shape.counts[type] || 0) + 1;
+    if (!shape.types[type]) shape.types[type] = shapeOf(r, 0);
+    for (const [k, v] of Object.entries(r)) recordValueSets(v, k);
+    if (Array.isArray(r.data?.stream)) noteStream(r.data.stream); // v3 nested stream
+  };
+  const noteStream = (stream: unknown): void => {
+    if (!Array.isArray(stream)) return;
+    for (const e of stream) {
+      if (!e || typeof e !== "object") continue;
+      const entry = e as Record<string, unknown>;
+      const chunk = entry.chunk as { type?: unknown } | undefined;
+      const kind = String(entry.type ?? "?") + (chunk && chunk.type != null ? ":" + String(chunk.type) : "");
+      shape.streamKinds[kind] = (shape.streamKinds[kind] || 0) + 1;
+      for (const [k, v] of Object.entries(entry)) recordValueSets(v, "stream." + k);
+    }
+  };
+
   for (const ln of lines) {
     let r: JsonRecord;
-    try { r = JSON.parse(ln) as JsonRecord; } catch { continue; }
-    if (!r || typeof r !== "object") continue;
+    try { r = JSON.parse(ln) as JsonRecord; } catch { shape.unparsed++; continue; }
+    if (!r || typeof r !== "object") { shape.unparsed++; continue; }
+    noteRecord(r);
     const cat = r.type ? EVENT_CAT[r.type] : undefined;
     if (cat) out.events[cat]++;
     if (r.type === "tool/code-dispatch" && r.data?.name) out.tools[r.data.name] = (out.tools[r.data.name] || 0) + 1;
@@ -415,18 +903,29 @@ export function parseTrajectoryText(text: string): ParsedTrajectory {
     }
     if (r.type === "session") {
       out.meta = { id: r.id ?? null, cwd: r.cwd ?? null, createdAt: r.createdAt ?? null, agentPreset: r.agentPreset ?? null };
+      if (typeof r.version === "number") out.formatVersion = r.version;
     } else if (r.type === "request/header") {
       if (typeof r.time === "number") lastRequestTime = r.time; // request sent -> TTFT clock starts
       const hdr = r.data?.header;
+      // v0 keeps the system prompt here; v3 moved it to a system/message record
+      // (its request/header still carries the tools definitions).
       if (typeof hdr?.system === "string") systemChars = hdr.system.length;
       if (Array.isArray(hdr?.tools)) toolsChars = JSON.stringify(hdr.tools).length;
       const cfg = hdr?.config;
       if (cfg?.model) { curModel = cfg.model; curProvider = cfg.provider ?? curProvider; addModelChange(r.seq, cfg.provider, cfg.model); }
+      if (systemChars || toolsChars) backfillPromptConfig();
     } else if (r.type === "request/context") {
       if (typeof r.time === "number") lastRequestTime = r.time;
       if (typeof r.data?.contextWindow === "number") contextWindow = r.data.contextWindow;
       if (r.data?.model) { curModel = r.data.model; curProvider = r.data.provider ?? curProvider; addModelChange(r.seq, r.data.provider, r.data.model); }
+    } else if (r.type === "turn/start") {
+      const turnNo = r.data?.turn;
+      if (turnNo != null) {
+        const t = ensureTurn(turnNo, typeof r.seq === "number" ? r.seq : null, typeof r.time === "number" ? r.time : null);
+        if (t.startTime == null && typeof r.time === "number") t.startTime = r.time;
+      }
     } else if (r.type === "step/start") {
+      if (r.data?.turn != null) ensureTurn(r.data.turn, typeof r.seq === "number" ? r.seq : null, null).steps++;
       if (typeof r.time === "number" && r.data?.turn != null && r.data?.step != null) stepStartTime.set(r.data.turn + ":" + r.data.step, r.time);
       if (r.data?.turn != null && r.data?.step != null) {
         const k = r.data.turn + ":" + r.data.step;
@@ -449,9 +948,66 @@ export function parseTrajectoryText(text: string): ParsedTrajectory {
       // "turns" counter above and add this as an explicit event category so the
       // dashboard can show how often the user cut a turn short.
       const rs = r.data?.reason;
-      if (rs && rs.kind === "aborted" && rs.reason && rs.reason.kind === "user") out.events.userStops++;
+      const turnNo = r.data?.turn ?? null;
+      const isUserStop = !!(rs && rs.kind === "aborted" && rs.reason && rs.reason.kind === "user");
+      if (isUserStop) out.events.userStops++;
+      const kind = rs?.kind;
+      const detail = isUserStop
+        ? "stopped by user"
+        : (typeof (rs as any)?.error === "string" ? (rs as any).error
+          : (rs?.reason && typeof (rs.reason as any)?.kind === "string" ? String((rs.reason as any).kind) : null));
+      if (turnNo != null) {
+        const t = ensureTurn(turnNo, typeof r.seq === "number" ? r.seq : null, null);
+        t.endTime = typeof r.time === "number" ? r.time : t.endTime;
+        t.status = (kind && TURN_STATUS.has(kind) ? kind : "completed") as TurnStatus;
+        t.detail = detail;
+      }
+      const evKind: TimelineKind = isUserStop ? "user-stop" : (kind === "completed" ? "info" : "error");
+      if (evKind !== "info" || detail) {
+        timelineEvent({ turn: turnNo }, typeof r.seq === "number" ? r.seq : null, typeof r.time === "number" ? r.time : null, evKind, isUserStop ? "Turn stopped by user" : oneLine((kind || "ended") + (detail ? " — " + detail : ""), 200));
+      }
+    } else if (r.type === "llm/retry") {
+      const d = r.data as any;
+      const fail = d?.failure;
+      const txt = "Retry " + (d?.retry ?? "?") + "/" + (d?.maxRetries ?? "?")
+        + (fail?.code ? " · " + fail.code : "")
+        + (fail?.message ? ": " + oneLine(String(fail.message), 80) : "")
+        + (d?.delayMs ? " (after " + Math.round(d.delayMs) + "ms)" : "");
+      timelineEvent(d ?? {}, typeof r.seq === "number" ? r.seq : null, typeof r.time === "number" ? r.time : null, "retry", txt);
+    } else if (r.type === "approval/asked") {
+      const d = r.data as any;
+      const txt = "Approval asked · " + (d?.toolName || "tool") + (d?.reason ? " — " + oneLine(String(d.reason), 140) : "");
+      timelineEvent(d ?? {}, typeof r.seq === "number" ? r.seq : null, typeof r.time === "number" ? r.time : null, "approval", txt);
+    } else if (r.type === "approval/decided") {
+      const d = r.data as any;
+      timelineEvent(d ?? {}, typeof r.seq === "number" ? r.seq : null, typeof r.time === "number" ? r.time : null, "approval", "Approval " + (d?.outcome || "decided"));
+    } else if (r.type === "todo/write") {
+      const list = (r.data as any)?.todos;
+      const txt = Array.isArray(list) ? "Todo list written — " + list.length + " item" + (list.length === 1 ? "" : "s") : "Todo list written";
+      timelineEvent(r.data ?? {}, typeof r.seq === "number" ? r.seq : null, typeof r.time === "number" ? r.time : null, "todo", txt);
+    } else if (r.type === "command/done") {
+      const d = r.data as any;
+      const txt = "Command " + (d?.kind || "done") + (d?.text ? ": " + oneLine(String(d.text), 120) : "");
+      timelineEvent(d ?? {}, typeof r.seq === "number" ? r.seq : null, typeof r.time === "number" ? r.time : null, "command", txt);
+    } else if (r.type === "model/selection") {
+      const d = r.data as any;
+      const txt = "Model → " + (d?.model || "?") + (d?.provider ? " · " + d.provider : "") + (d?.reasoningEffort ? " · " + d.reasoningEffort : "");
+      timelineEvent(d ?? {}, typeof r.seq === "number" ? r.seq : null, typeof r.time === "number" ? r.time : null, "model", txt);
+    } else if (r.type === "agent-preset/selected") {
+      const d = r.data as any;
+      timelineEvent({}, typeof r.seq === "number" ? r.seq : null, typeof r.time === "number" ? r.time : null, "info", "Agent preset: " + (d?.agentPreset || "?"));
+    } else if (r.type === "deliverables/presented") {
+      const files = (r.data as any)?.files;
+      const txt = "Deliverables presented — " + (Array.isArray(files) ? files.length + " file" + (files.length === 1 ? "" : "s") : "files");
+      timelineEvent(r.data ?? {}, typeof r.seq === "number" ? r.seq : null, typeof r.time === "number" ? r.time : null, "deliverable", txt);
+    } else if (r.type === "session/title") {
+      const d = r.data as any;
+      const title = typeof d?.title === "string" ? d.title : "";
+      if (title) timelineEvent({}, typeof r.seq === "number" ? r.seq : null, typeof r.time === "number" ? r.time : null, "title", "Session title: " + oneLine(title, 120) + (d?.source?.kind ? " (" + d.source.kind + ")" : ""));
     } else if (r.type === "compaction/start") {
+      const turnNo = (r.data as any)?.turn ?? null;
       newCompaction(typeof r.seq === "number" ? r.seq : null, typeof r.time === "number" ? r.time : null, typeof r.data?.compactionId === "string" ? r.data.compactionId : null);
+      timelineEvent({ turn: turnNo }, typeof r.seq === "number" ? r.seq : null, typeof r.time === "number" ? r.time : null, "compaction", "Compaction started");
     } else if (r.type === "compaction/summary") {
       const cid = typeof r.data?.compactionId === "string" ? r.data.compactionId : null;
       let ev = cid ? compactionBy.get(cid) : undefined;
@@ -471,9 +1027,13 @@ export function parseTrajectoryText(text: string): ParsedTrajectory {
       if (cu && (typeof cu.inputTokens === "number" || typeof cu.cacheReadTokens === "number")) {
         ev.contextBefore = (typeof cu.inputTokens === "number" ? cu.inputTokens : 0) + (typeof cu.cacheReadTokens === "number" ? cu.cacheReadTokens : 0);
       }
+      timelineEvent(r.data ?? {}, typeof r.seq === "number" ? r.seq : null, typeof r.time === "number" ? r.time : null, "compaction",
+         oneLine("Compaction summary" + (ev.shadowedTokens ? " — " + ev.shadowedTokens + " tokens shadowed" : "") + " (" + ev.summaryChars + " chars)", 200));
     } else if (r.type === "compaction/prune") {
       out.prunes++;
       if (typeof r.data?.shadowedTokenCount === "number") out.prunedTokens += r.data.shadowedTokenCount;
+      timelineEvent(r.data ?? {}, typeof r.seq === "number" ? r.seq : null, typeof r.time === "number" ? r.time : null, "prune",
+         oneLine("Pruned " + (typeof r.data?.shadowedTokenCount === "number" ? r.data.shadowedTokenCount + " tokens" : "context"), 120));
     } else if (r.type === "compaction/end") {
       const cid = typeof r.data?.compactionId === "string" ? r.data.compactionId : null;
       let ev = cid ? compactionBy.get(cid) : undefined;
@@ -484,6 +1044,11 @@ export function parseTrajectoryText(text: string): ParsedTrajectory {
       if (typeof r.time === "number") ev.endTime = r.time;
       if (typeof r.data?.error === "string") ev.error = r.data.error;
       if (ev.endTime != null && ev.time != null && ev.endTime > ev.time) ev.durationMs = ev.endTime - ev.time;
+      // A FAILED compaction carries an error here (aborted / terminated /
+      // context-exceeded) — surface it on the timeline; successful ones were
+      // already reported by the compaction/summary row.
+      if (ev.error) timelineEvent(r.data ?? {}, typeof r.seq === "number" ? r.seq : null, typeof r.time === "number" ? r.time : null, "error",
+        oneLine("Compaction failed — " + ev.error, 160));
       // Only a SUCCESSFUL compaction (one that produced a summary) actually
       // replaced the conversation. Failed ones (aborted / terminated /
       // context-exceeded — carried as error on this record) leave the original
@@ -493,40 +1058,61 @@ export function parseTrajectoryText(text: string): ParsedTrajectory {
         msgCharsRunning = 0; // the conversation was replaced by a summary — old messages leave the context
       }
     } else if (r.type === "user/message") {
-      addUserMsg(r.data?.id, typeof r.seq === "number" ? r.seq : 0, r.data?.content);
+      const seq = typeof r.seq === "number" ? r.seq : 0;
+      addUserMsg(r.data?.id, seq, r.data?.content);
+      notePrompt(r.data?.turn ?? null, seq, r.data?.content);
+    } else if (r.type === "system/message") {
+      // v3: the system prompt is a record, not request/header.header.system.
+      // One timeline row (never per step): it opens the session's context.
+      if (!out.timeline.events.some((e) => e.kind === "system")) {
+        const chars = sumTextBlocks((r.data?.message as any)?.content);
+        timelineEvent({}, typeof r.seq === "number" ? r.seq : null, typeof r.time === "number" ? r.time : null, "system",
+          "System prompt — " + chars + " chars" + (typeof r.data?.turn === "number" ? " · first sent in turn " + r.data.turn : ""));
+      }
+      const content = (r.data?.message as any)?.content;
+      if (Array.isArray(content)) {
+        let n = 0;
+        for (const c of content) if (c && typeof c === "object" && c.type === "text" && typeof c.text === "string") n += c.text.length;
+        if (n) { systemChars = n; backfillPromptConfig(); }
+      }
     } else if (r.type === "agent/inbox/spliced") {
-      for (const m of (r.data?.inserted || [])) addUserMsg((m as any)?.id, typeof r.seq === "number" ? r.seq : 0, (m as any)?.content);
+      for (const m of (r.data?.inserted || [])) {
+        addUserMsg((m as any)?.id, typeof r.seq === "number" ? r.seq : 0, (m as any)?.content);
+        notePrompt((m as any)?.turn ?? null, typeof r.seq === "number" ? r.seq : 0, (m as any)?.content);
+      }
     } else if (r.type === "assistant/message") {
       msgCharsRunning += assistantMsgChars(r.data?.message);
+      noteResponse(r.data?.turn ?? null, (r.data?.message as any)?.content);
+      // v3: the whole stream + the authoritative per-step usage are nested here.
+      // (Replayed through processStream, the same handlers the v0 top-level
+      // assistant/chunk records use.) Consume the pending request time first so a
+      // stream whose records carry no time can still be timed from the request.
+      const reqTime = lastRequestTime;
+      if (typeof r.data?.turn === "number" || typeof r.data?.step === "number") {
+        const k = stepKeyOf(r.data?.turn, r.data?.step);
+        if (Array.isArray(r.data?.stream)) for (const e of r.data.stream) processStream(e as unknown as StreamEntry, k, reqTime, r.data.turn, r.data.step);
+        // The message's serving model (v0 got this from chunk.finish.replayState).
+        const src = (r.data?.message as any)?.source;
+        if (src?.kind === "model" && src.model) { curModel = src.model; curProvider = src.provider ?? curProvider; }
+        // Fallback usage source: v3 mirrors the stream's usage chunk on data.usage.
+        // recordUsage de-dupes by step, so this only fires when the stream had none.
+        if (r.data?.usage && !usageRecordedByKey.has(k)) {
+          if (!firstChunkTime.has(k) && typeof r.time === "number") firstChunkTime.set(k, r.time);
+          recordUsage(r.data, { usage: r.data.usage } as UsageChunk, r.time, r.data.usage as UsageInfo);
+        }
+      }
+      lastRequestTime = null; // consumed by this step's stream
     } else if (r.type === "tool/result") {
       msgCharsRunning += toolResultChars(r.data?.message);
     } else if (r.type === "reasoning-chunks") {
+      // v0 fine-grained thinking stream (v3 nests the same entry in data.stream).
       if (r.data?.turn != null && r.data?.step != null) {
-        const k = r.data.turn + ":" + r.data.step;
-        noteThinking(k, typeof r.time0 === "number" ? r.time0 : r.time);
-        for (const t of (r.data.texts || [])) if (typeof t === "string") reasoningCharsByKey.set(k, (reasoningCharsByKey.get(k) || 0) + t.length);
+        processStream({ type: r.type, time0: r.time0, texts: r.data.texts } as StreamEntry, stepKeyOf(r.data.turn, r.data.step), lastRequestTime);
       }
     } else if (r.type === "assistant/chunk") {
-      const chunk = r.data?.chunk;
-      if (!chunk) continue;
-      const stepKey = (r.data?.turn ?? "?") + ":" + (r.data?.step ?? "?");
-      if (typeof r.time === "number" && !firstChunkTime.has(stepKey)) {
-        firstChunkTime.set(stepKey, r.time);
-        const stepStart = stepStartTime.get(stepKey);
-        if (typeof stepStart === "number" && r.time > stepStart) ttftByKey.set(stepKey, r.time - stepStart);
-        else if (typeof lastRequestTime === "number" && r.time > lastRequestTime) ttftByKey.set(stepKey, r.time - lastRequestTime);
-        lastRequestTime = null; // consumed by this step's stream
-      }
-      if (chunk.type === "reasoning-delta") {
-        noteThinking(stepKey, r.time); // coarser thinking stream — merged with reasoning-chunks
-        if (typeof chunk.text === "string" && chunk.text) reasoningDeltaCharsByKey.set(stepKey, (reasoningDeltaCharsByKey.get(stepKey) || 0) + chunk.text.length);
-      }
-      if (chunk.type === "usage") recordUsage(r.data, chunk, r.time);
-      else if (chunk.type === "finish") {
-        const resp = chunk.replayState?.response;
-        if (resp?.model) { curModel = resp.model; curProvider = resp.provider ?? curProvider; }
-        if (chunk.usage) recordUsage(r.data, chunk, r.time); // some shapes carry usage on the finish chunk
-      }
+      if (!r.data?.chunk) continue;
+      processStream({ ...r.data, chunk: r.data.chunk, time: r.time } as StreamEntry, stepKeyOf(r.data.turn, r.data.step), lastRequestTime);
+      lastRequestTime = null; // consumed by this step's stream
     }
   }
 
@@ -601,6 +1187,32 @@ export function parseTrajectoryText(text: string): ParsedTrajectory {
   ];
   out.p2pMentions = (p2pText.match(/p2p/g) || []).length + (p2pText.match(/peer-to-peer|peer to peer/g) || []).length;
   out.p2p = P2P_EVIDENCE.some((re) => re.test(text));
+  // Deterministic shape: insertion order follows first-seen stream order, which is
+  // stable for a given file, but sort the maps so two snapshots of the same format
+  // are byte-identical regardless of the session.
+  shape.types = Object.fromEntries(Object.entries(shape.types).sort((a, b) => a[0].localeCompare(b[0])));
+  shape.counts = Object.fromEntries(Object.entries(shape.counts).sort((a, b) => a[0].localeCompare(b[0])));
+  shape.valueSets = Object.fromEntries(Object.entries(shape.valueSets).sort((a, b) => a[0].localeCompare(b[0])));
+  shape.streamKinds = Object.fromEntries(Object.entries(shape.streamKinds).sort((a, b) => a[0].localeCompare(b[0])));
+  shape.version = out.formatVersion;
+
+  // ── finalize the per-turn / event timeline ─────────────────────────────────
+  // Most v0 records (approvals, todos, retries, compactions, commands) carry NO
+  // turn field, so an event with `turn === null` is placed by its seq against the
+  // turn boundaries — unless it is a session-level record (system prompt, title,
+  // preset), which genuinely belongs before turn 1.
+  const SESSION_LEVEL_EVENTS = new Set<TimelineKind>(["system", "title", "info", "session"]);
+  for (const e of out.timeline.events) {
+    if (e.turn != null || SESSION_LEVEL_EVENTS.has(e.kind)) continue;
+    e.turn = (e.seq != null ? turnForSeq(e.seq) : null) ?? (turnOrder[0] ?? null);
+  }
+  out.timeline.turns = [...turnMap.values()];
+  // Stable display order: seq when known (stream order), else time, else turn.
+  out.timeline.events.sort((a, b) => {
+    const as = a.seq ?? Number.MAX_SAFE_INTEGER, bs = b.seq ?? Number.MAX_SAFE_INTEGER;
+    if (as !== bs) return as - bs;
+    return (a.time ?? 0) - (b.time ?? 0);
+  });
   return out;
 }
 
@@ -669,7 +1281,7 @@ export function readTrajectory(filePath: string): ParsedTrajectory | null {
 // Map so unchanged trajectories are served from the persisted parse without
 // re-reading, re-decompressing, or re-parsing. After a load batch that recomputed
 // any entries, saveDiskCache() flushes the updated Map back to disk.
-const CACHE_VERSION = 13; // bumped: ParsedTrajectory now carries p2p / p2pMentions (GPU peer-to-peer evidence)
+const CACHE_VERSION = 15; // bumped: ParsedTrajectory.timeline (per-turn prompts/outcomes + session event timeline) (usage now read from assistant/message.data.stream + data.usage) and ParsedTrajectory gained formatVersion/shape
 let _diskCachePath: string | null = null;
 let _diskCacheLoaded = false;
 

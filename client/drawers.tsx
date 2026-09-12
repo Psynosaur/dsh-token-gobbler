@@ -7,6 +7,117 @@ import { sessionTokens } from "./agg";
 import { AmBarChart, type AmSeries } from "./amchart";
 import { Markdown } from "./markdown";
 
+// ── turn timeline (prompts, outcomes, all non-step events) ──────────────────
+// How a turn ended, from the trajectory's turn/end record. `color` drives the
+// badge; the ⚠ marks anything that did NOT simply complete.
+const TURN_STATUS_META: Record<string, { label: string; color: string; warn?: boolean }> = {
+  completed: { label: "completed", color: "#34d399" },
+  open: { label: "in progress", color: "#60a5fa" },
+  aborted: { label: "aborted", color: "#f87171", warn: true },
+  blocked: { label: "blocked", color: "#fb923c", warn: true },
+  error: { label: "error", color: "#ef4444", warn: true },
+  "max-tokens": { label: "max tokens", color: "#fbbf24", warn: true },
+  interrupted: { label: "interrupted", color: "#f59e0b", warn: true },
+};
+// Every event category on the timeline. Order here IS the legend order.
+const EVENT_META_KINDS: { key: string; icon: string; label: string; color: string }[] = [
+  { key: "system", icon: "⚙", label: "System prompt", color: "#94a3b8" },
+  { key: "prompt", icon: "▸", label: "Your message", color: "#34d399" },
+  { key: "error", icon: "⚠", label: "Error / abort", color: "#ef4444" },
+  { key: "user-stop", icon: "■", label: "User stop", color: "#f87171" },
+  { key: "retry", icon: "↻", label: "LLM retry", color: "#fb923c" },
+  { key: "approval", icon: "✋", label: "Approval", color: "#fbbf24" },
+  { key: "compaction", icon: "✂", label: "Compaction", color: "#f472b6" },
+  { key: "prune", icon: "✂", label: "Prune", color: "#f9a8d4" },
+  { key: "todo", icon: "☑", label: "Todo write", color: "#a3e635" },
+  { key: "command", icon: "⌘", label: "Command", color: "#38bdf8" },
+  { key: "title", icon: "🏷", label: "Title", color: "#94a3b8" },
+  { key: "model", icon: "⇄", label: "Model change", color: "#60a5fa" },
+  { key: "deliverable", icon: "📦", label: "Deliverables", color: "#2dd4bf" },
+  { key: "info", icon: "•", label: "Info", color: "#94a3b8" },
+];
+const EVENT_META_BY_KIND: Record<string, { icon: string; label: string; color: string }> =
+  Object.fromEntries(EVENT_META_KINDS.map((e) => [e.key, e]));
+const evMeta = (kind: string) => EVENT_META_BY_KIND[kind] || { icon: "•", label: kind, color: "#94a3b8" };
+
+const clockTime = (t: number): string => {
+  const d = new Date(t);
+  return String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0");
+};
+const statusBadge = (status: string, detail?: string | null) => {
+  const m = TURN_STATUS_META[status] || TURN_STATUS_META.open;
+  return jsxs("span", {
+    title: "turn/end: " + status + (detail ? " — " + detail : ""),
+    style: { display: "inline-flex", alignItems: "center", gap: 4, padding: "1px 6px", borderRadius: 8, fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.3, color: m.color, background: m.color + "1f", border: "1px solid " + m.color + "55" },
+    children: [m.warn ? "⚠ " : "", m.label],
+  });
+};
+const timelineChip = (e: any, i: number) => {
+  const m = evMeta(e.kind);
+  const stamp = e.time ? clockTime(e.time) + " · " : "";
+  return jsx("span", {
+    key: "ev" + i,
+    title: stamp + e.text,
+    style: { display: "inline-flex", alignItems: "center", gap: 4, maxWidth: 320, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", padding: "1px 7px", borderRadius: 8, fontSize: 10.5, color: m.color, background: m.color + "14", border: "1px solid " + m.color + "44" },
+    children: [jsx("span", { children: m.icon }), jsx("span", { children: e.text })],
+  });
+};
+
+/**
+ * The turn outline: one card per turn — status badge, prompt, response, then the
+ * turn's compact event chips (errors, stops, retries, approvals, compactions, …).
+ * Falls back to the step tree when a session predates the timeline records, so
+ * old sessions still show turns (without prompts).
+ */
+export const TurnTimelineSection = ({ s, maxTurns = 12 }: { s: any; maxTurns?: number }) => {
+  const tl = s.turnTimeline;
+  const byTurn = new Map<number, any[]>();
+  const sessionEvents: any[] = [];
+  for (const e of (tl && tl.events) || []) {
+    if (e.kind === "prompt") continue; // the turn card already shows the prompt
+    if (e.turn == null) { sessionEvents.push(e); continue; }
+    const arr = byTurn.get(e.turn) || [];
+    arr.push(e);
+    byTurn.set(e.turn, arr);
+  }
+  // Turns from the timeline when present, else from the step tree (older sessions).
+  const turns: any[] = tl && tl.turns && tl.turns.length
+    ? tl.turns
+    : (s.stepTree || []).map((t: any) => ({ turn: t.turn, status: "completed", steps: (t.steps || []).length, prompt: "", response: "", detail: null }));
+  if (!turns.length) return null;
+  const shown = turns.slice(0, maxTurns);
+  const hidden = turns.length - shown.length;
+  const legend = EVENT_META_KINDS.filter((k) => k.key === "prompt" ? false : true);
+  return jsxs("div", { style: { marginBottom: 14 }, children: [
+    jsx("div", { className: "tg-drawer-sec", children: "Turn outline & events" }),
+    sessionEvents.length ? jsxs("div", { style: { display: "flex", flexWrap: "wrap", gap: 5, marginBottom: 10, alignItems: "center" }, children: [
+      jsx("span", { className: "tg-faint", style: { fontSize: 10, marginRight: 4 }, children: "Session" }),
+      ...sessionEvents.map(timelineChip),
+    ]}) : null,
+    ...shown.map((t: any) => {
+      const evs = byTurn.get(t.turn) || [];
+      const status = t.status || (t.detail ? "aborted" : "completed");
+      const steps = t.steps != null ? t.steps : (s.stepTree || []).find((x: any) => x.turn === t.turn)?.steps?.length;
+      return jsxs("div", { className: "tg-turn", children: [
+        jsxs("div", { style: { display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }, children: [
+          jsx("span", { style: { fontWeight: 700, fontSize: 12 }, children: "Turn " + t.turn }),
+          statusBadge(status, t.detail),
+          steps != null ? jsx("span", { className: "tg-faint", style: { fontSize: 10.5 }, children: steps + " step" + (steps === 1 ? "" : "s") }) : null,
+          t.startTime && t.endTime && t.endTime > t.startTime ? jsx("span", { className: "tg-faint", style: { fontSize: 10.5 }, children: fmtMs(t.endTime - t.startTime) + " wall" }) : null,
+        ]}),
+        t.prompt ? jsx("div", { className: "tg-turn-p", children: t.prompt }) : null,
+        t.response ? jsx("div", { className: "tg-turn-r", children: t.response }) : null,
+        evs.length ? jsx("div", { style: { display: "flex", flexWrap: "wrap", gap: 5, marginTop: 6 }, children: evs.map(timelineChip) }) : null,
+      ]}, "turn-" + t.turn);
+    }),
+    hidden > 0 ? jsx("div", { className: "tg-faint", style: { fontSize: 10.5, padding: "4px 2px" }, children: "… " + hidden + " more turn" + (hidden === 1 ? "" : "s") + " (of " + turns.length + ")" }) : null,
+    tl && tl.totalEvents > ((tl.events || []).length) ? jsx("div", { className: "tg-faint", style: { fontSize: 10, marginTop: 4 }, children: "showing " + (tl.events || []).length + " of " + tl.totalEvents + " events" }) : null,
+    jsxs("div", { className: "tg-faint", style: { fontSize: 10, marginTop: 6, display: "flex", flexWrap: "wrap", gap: 10 }, children: [
+      ...legend.map((k) => jsxs("span", { style: { display: "inline-flex", alignItems: "center", gap: 3, color: k.color }, children: [k.icon, jsx("span", { children: k.label })] }, "lg-" + k.key)),
+    ]}),
+  ]});
+};
+
 // Turn → step tree with tool calls + per-step prefill/decode. (server-reported
 // timings were removed — all speeds are trajectory timestamps.)
 export const stepTree = (s: any) => {
@@ -137,7 +248,7 @@ export const sessionDrawer = (s: any) => {
     ]}) : null,
     (s.steps && s.steps.length) ? jsxs("div", { children: [
       jsx("div", { className: "tg-drawer-sec", children: "Per-step — prefill / decode speed + thinking" }),
-      jsx("div", { className: "tg-scrollable", children: jsxs("table", { className: "tg-table", style: { fontSize: 12 }, children: [
+      jsx("div", { className: "tg-scrollable", children: jsxs("table", { className: "tg-table tg-sticky", style: { fontSize: 12 }, children: [
         jsx("tr", { children: [thL("Step"), thR("In"), thR("Out"), thR("Thinking"), thR("TTFT"), thR("Prefill"), thR("Dec time"), thR("Dec speed")] }),
         ...s.steps.flatMap((st: any, i: number) => {
           const showTurn = i === 0 || s.steps[i - 1].turn !== st.turn;
@@ -158,7 +269,8 @@ export const sessionDrawer = (s: any) => {
       ]})}),
       jsx("div", { className: "tg-faint", style: { fontSize: 10, marginTop: 4 }, children: "Prefill/decode speeds use the trajectory's own timestamps (TTFT includes network + queue, so prefill is a lower bound). Thinking = reasoning tokens (≈ estimated from the reasoning text when the provider reports 0)." }),
     ]}) : null,
-    (m.turnOutline && m.turnOutline.length) ? jsxs("div", { children: [
+    s.turnTimeline ? jsx(TurnTimelineSection, { s, maxTurns: 24 }) : null,
+    (m.turnOutline && m.turnOutline.length && !s.turnTimeline) ? jsxs("div", { children: [
       jsx("div", { className: "tg-drawer-sec", children: "Turn outline" }),
       m.turnOutline.map((t: any) => jsxs("div", { className: "tg-turn", children: [
         jsx("div", { className: "tg-turn-p", children: "Turn " + t.turn + (t.prompt ? " — " + t.prompt : "") }),
@@ -453,11 +565,27 @@ const CompactionModal = ({ session, comp, onClose }: { session: string; comp: an
 // tools, tokens (in/out/cache/think) AND timing (TTFT / prefill / decode).
 // `compactions` (CompactionLite[]) inserts an explicit COMPACTED banner row at
 // each compaction's "Between turns" position; clicking it opens the detail popup.
-const CombinedStepTable = ({ steps, defaultClosed = false, compactions, onCompaction }: { steps: any[]; defaultClosed?: boolean; compactions?: any[]; onCompaction?: (c: any) => void }) => {
+const CombinedStepTable = ({ steps, defaultClosed = false, compactions, onCompaction, turnTimeline }: { steps: any[]; defaultClosed?: boolean; compactions?: any[]; onCompaction?: (c: any) => void; turnTimeline?: any }) => {
   // defaultClosed = every turn starts collapsed (Daily tab view); otherwise all
   // turn rows start expanded (Combined tab).
   const [closed, setClosed] = React.useState<Set<number>>(() => (defaultClosed ? new Set((steps || []).map((t: any) => t.turn)) : new Set()));
   const toggle = (turn: number) => setClosed((p) => { const n = new Set(p); if (n.has(turn)) n.delete(turn); else n.add(turn); return n; });
+  // Turn outcome + per-turn event markers for the turn header rows, from the
+  // trajectory timeline ({turns, events}); prompt events are skipped (the Turn
+  // outline section shows the prompt text itself).
+  const tlByTurn = React.useMemo(() => {
+    const map = new Map<number, { status: string | null; detail: string | null; events: any[] }>();
+    const get = (turn: number) => { let e = map.get(turn); if (!e) { e = { status: null, detail: null, events: [] }; map.set(turn, e); } return e; };
+    for (const t of (turnTimeline && turnTimeline.turns) || []) { const e = get(t.turn); e.status = t.status || "completed"; e.detail = t.detail ?? null; }
+    for (const ev of (turnTimeline && turnTimeline.events) || []) {
+      if (ev.kind === "prompt" || ev.turn == null) continue;
+      get(ev.turn).events.push(ev);
+    }
+    // Turns known only from the step tree (a session with no turn records) still
+    // get a badge, so every turn row reads the same way.
+    for (const t of steps || []) { const e = get(t.turn); if (!e.status) e.status = "completed"; }
+    return map;
+  }, [turnTimeline, steps]);
   // ── COMPACTED banner placement ────────────────────────────────────────────
   // Each compaction gets a banner row at its "Between turns" position: anchored
   // AFTER the last step that ran before it (comp.afterTurn/afterStep). When that
@@ -500,7 +628,7 @@ const CombinedStepTable = ({ steps, defaultClosed = false, compactions, onCompac
     if (target) beforeTurn.set(target.turn, [...(beforeTurn.get(target.turn) || []), c]);
     else bannerEnd.push(c);
   }
-  return jsx("table", { className: "tg-table", style: { fontSize: 12.5 }, children: [
+  return jsx("div", { className: "tg-field-scroll", children: jsx("table", { className: "tg-table tg-sticky", style: { fontSize: 12.5 }, children: [
     jsx("tr", { children: [thL("Step"), thL("Tools"), thR("In"), thR("Out"), thR("Cache"), thR("Think"), thR("Prefill"), thR("Decode"), thR("TTFT"), thR("Dec time"), thR("Runtime"), thR("Ctx")] }),
     ...(steps || []).flatMap((turn: any) => {
       const isClosed = closed.has(turn.turn);
@@ -533,6 +661,18 @@ const CombinedStepTable = ({ steps, defaultClosed = false, compactions, onCompac
           tdL(jsxs("span", { style: { display: "flex", alignItems: "center", gap: 7, fontWeight: 700 }, children: [
             jsx("span", { className: "tg-chev" + (isClosed ? "" : " open"), children: "▶" }),
             jsx("span", { children: "Turn " + turn.turn }),
+            (() => {
+              // The turn's outcome + its non-step events, inline on the turn row —
+              // the same signal the Turn outline section shows in full.
+              const td = tlByTurn.get(turn.turn);
+              const st = td ? td.status : null;
+              if (!td || (!st && !td.events.length)) return null;
+              return jsxs("span", { style: { display: "inline-flex", alignItems: "center", gap: 4 }, children: [
+                st ? statusBadge(st, td.detail) : null,
+                ...td.events.slice(0, 4).map((e: any) => jsx("span", { title: e.text, style: { fontSize: 10 }, children: evMeta(e.kind).icon })),
+                td.events.length > 4 ? jsx("span", { className: "tg-faint", style: { fontSize: 10 }, children: "+" + (td.events.length - 4) }) : null,
+              ]});
+            })(),
           ]})),
           tdL(jsx("span", { className: "tg-faint", style: { fontSize: 11 }, children: turn.steps.length + " step" + (turn.steps.length > 1 ? "s" : "") })),
           tdR(fmtC(tIn), { style: { fontWeight: 700 } }),
@@ -566,7 +706,7 @@ const CombinedStepTable = ({ steps, defaultClosed = false, compactions, onCompac
       ];
     }),
     ...bannerEnd.map(bannerRow),
-  ]});
+  ]})});
 };
 
 // The combined step table + its COMPACTED popup state, as a real component:
@@ -576,7 +716,7 @@ const CombinedStepTable = ({ steps, defaultClosed = false, compactions, onCompac
 const CompactionTable = ({ s, defaultClosed = false }: { s: any; defaultClosed?: boolean }) => {
   const [compOpen, setCompOpen] = React.useState<any>(null);
   return jsxs("div", { children: [
-    jsx("div", { className: "tg-scrollable", children: jsx(CombinedStepTable, { steps: s.stepTree, defaultClosed, compactions: s.compactionEvents, onCompaction: setCompOpen }) }),
+    jsx(CombinedStepTable, { steps: s.stepTree, defaultClosed, compactions: s.compactionEvents, onCompaction: setCompOpen, turnTimeline: s.turnTimeline }),
     compOpen ? jsx(CompactionModal, { session: s.id, comp: compOpen, onClose: () => setCompOpen(null) }) : null,
   ]});
 };
@@ -733,17 +873,6 @@ export const combinedDrawer = (s: any, opts: { defaultClosed?: boolean } = {}) =
   const tot = sessionTokens(s);
   return jsxs("div", { className: "tg-drawer-inner", children: [
     metaGrid(meta),
-    jsxs("div", { style: { marginBottom: 14 }, children: [
-      jsx("div", { className: "tg-drawer-sec", children: "Token breakdown — this session" }),
-      jsx("div", { className: "tg-chipgrid", children: [
-        glance("In", tot.tin, "#60a5fa"),
-        glance("Out", tot.tout, "#a78bfa"),
-        glance("Cache", tot.tcache, "#2dd4bf"),
-        glance("Thinking", tot.tthink, "#c084fc"),
-        glance("Tools", tot.ttools, "#34d399"),
-        glance("Total", tot.total, "#fbbf24", true),
-      ]}),
-    ]}),
     perfHas ? jsxs("div", { style: { marginBottom: 14 }, children: [
       jsxs("div", { style: { display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 10 }, children: [
         jsx("div", { className: "tg-drawer-sec", style: { marginBottom: 0 }, children: "Performance & context — over steps" }),
@@ -769,6 +898,18 @@ export const combinedDrawer = (s: any, opts: { defaultClosed?: boolean } = {}) =
       }),
       jsx("div", { className: "tg-faint", style: { fontSize: 10, marginTop: 6 }, children: "One chart for every compaction regime — x = step (session time; the shared axis auto-scales to the visible data, or pin its minimum with the x-min input). The context filling up is shown as filled area lines: each window's line (left axis = context size) rises step by step as the context fills, then drops at its ✂ compaction to the next window's starting context — the session's context sawtooth, in the window's color. Every step also plots as lines on the right log axis, one color per metric — in / out / thinking / cache (tokens) and prefill / decode (tok/s); hover any line for that step's full stats in one box. Click a window chip to remove or restore a whole window: its lines, its context area and the ✂ boundary lines it bounds all hide with it, and the x-axis rescales to the remaining windows. Each ✂ line marks a compaction, drawn at the step after which it ran: windows left of ✂ C1 ran before compaction 1, between ✂ C1 and ✂ C2 after it, and so on." }),
     ]}) : null,
+    jsx(TurnTimelineSection, { s }),
+    jsxs("div", { style: { marginBottom: 14 }, children: [
+      jsx("div", { className: "tg-drawer-sec", children: "Token breakdown — this session" }),
+      jsx("div", { className: "tg-chipgrid", children: [
+        glance("In", tot.tin, "#60a5fa"),
+        glance("Out", tot.tout, "#a78bfa"),
+        glance("Cache", tot.tcache, "#2dd4bf"),
+        glance("Thinking", tot.tthink, "#c084fc"),
+        glance("Tools", tot.ttools, "#34d399"),
+        glance("Total", tot.total, "#fbbf24", true),
+      ]}),
+    ]}),
     (s.stepTree && s.stepTree.length) ? jsxs("div", { children: [
       jsx("div", { className: "tg-drawer-sec", children: "Per turn & step — tokens + speed (combined)" }),
       jsx(CompactionTable, { s, defaultClosed: !!opts.defaultClosed }),

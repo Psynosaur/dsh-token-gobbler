@@ -204,7 +204,7 @@ function groupBody(g: Group): any {
   ]});
   const table = jsxs("div", { children: [
     jsx("div", { className: "tg-label", style: { marginBottom: 10 }, children: "Runs — oldest → newest" }),
-    jsx("div", { className: "tg-tscroll", children: jsxs("table", { className: "tg-table tg-sticky", children: [
+    jsx("div", { className: "tg-tscroll tg-vscroll", children: jsxs("table", { className: "tg-table tg-sticky", children: [
       jsx("tr", { children: [thL("Date"), thL("Session"), thR("Steps"), thR("Decode"), thR("Prefill"), thR("Avg TTFT"), thR("Avg ctx"), thR("In"), thR("Out"), thR("Cache"), thR("Think")] }),
       ...g.runs.map((r) => jsxs("tr", {
         className: "tg-tr",
@@ -259,7 +259,7 @@ function mixBody(mixed: Mixed[]): any {
             style: { width: (s.v / tot) * 100 + "%", background: s.c, height: "100%" },
             title: s.key + " · " + fmt(s.v) + " (" + ((s.v / tot) * 100).toFixed(1) + "%)",
           }, s.key)) }),
-        jsx("div", { className: "tg-tscroll", children: jsxs("table", { className: "tg-table tg-sticky", children: [
+        jsx("div", { className: "tg-tscroll tg-vscroll", children: jsxs("table", { className: "tg-table tg-sticky", children: [
           jsx("tr", { children: [thL("Model"), thR("Steps"), thR("Decode"), thR("Prefill"), thR("Avg TTFT"), thR("Share"), thR("In"), thR("Out"), thR("Cache"), thR("Think")] }),
           ...mx.runs.map((r, i) => {
             const v = r.run.in + r.run.out + r.run.cache + r.run.think;

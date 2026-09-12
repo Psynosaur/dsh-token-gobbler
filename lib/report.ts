@@ -22,7 +22,7 @@ import * as pricing from "./pricing.js";
 import * as trajectory from "./trajectory.js";
 import * as projcache from "./projcache.js";
 import type { TokenBuckets, PricingEntry, RateCard, DiscoveredModel } from "./pricing.js";
-import type { ModelChange, UsageRecord, EventCounts, CompactionEvent } from "./trajectory.js";
+import type { ModelChange, UsageRecord, EventCounts, CompactionEvent, TurnTimeline } from "./trajectory.js";
 import type { ProjcacheResult, ProjSession } from "./projcache.js";
 
 /** The models to cost the gobbling against: your free local baseline + Copilot's paid roster. */
@@ -52,6 +52,8 @@ export interface ResolvedPaths {
   sessionsRoot: string;
   storePath: string;
   storeKind: "dir" | "file";
+  /** The OTHER projection store, when both exist — they hold disjoint session sets. */
+  otherStorePath: string | null;
 }
 /** A scanned session's model timeline (for attribution). */
 interface TimelineInfo {
@@ -63,32 +65,37 @@ interface TimelineInfo {
 export function resolvePaths(opts: ReportOptions = {}): ResolvedPaths {
   const dshHome = opts.dshHome || process.env.DSH_HOME || join(homedir(), ".dsh");
   // The dsh update (2026-09) moved the projection store from a single JSON file to a
-  // directory of per-session files. Prefer the directory when it exists; fall back to
-  // the legacy file (still written by older dsh versions).
+  // directory of per-session files. Both stores can be LIVE at once and they hold
+  // DISJOINT session sets: a v0 session updates the legacy single file, a v3 session
+  // is written as its own file under `session_projcache/`. So rather than picking the
+  // more recently modified one (which silently drops the other era — v3 sessions
+  // vanished from the dashboard), resolve BOTH and merge them (see loadSources).
   let storePath = opts.storePath || process.env.DSH_PROJCACHE || null;
   let storeKind: "dir" | "file" = "file";
+  let otherStorePath: string | null = null;
+  const dirStore = join(dshHome, "storages", "session_projcache");
+  const fileStore = join(dshHome, "storages", "session_projcache.json");
   if (storePath) {
     try { storeKind = statSync(storePath).isDirectory() ? "dir" : "file"; } catch { storeKind = "file"; }
+    const sibling = storeKind === "dir" ? fileStore : dirStore;
+    try { if (statSync(sibling).isFile() || statSync(sibling).isDirectory()) otherStorePath = sibling; } catch { /* no sibling */ }
   } else {
-    const dirStore = join(dshHome, "storages", "session_projcache");
-    const fileStore = join(dshHome, "storages", "session_projcache.json");
-    // Prefer whichever store is more recently modified — on some installs (Ubuntu)
-    // DSH writes new sessions to the legacy file while the directory store is stale.
-    try {
-      const dirStat = statSync(dirStore);
-      const fileStat = statSync(fileStore);
-      if (dirStat.isDirectory() && dirStat.mtimeMs >= fileStat.mtimeMs) { storePath = dirStore; storeKind = "dir"; }
-      else { storePath = fileStore; storeKind = "file"; }
-    } catch {
-      if (existsSync(dirStore) && statSync(dirStore).isDirectory()) { storePath = dirStore; storeKind = "dir"; }
-      else { storePath = fileStore; storeKind = "file"; }
-    }
+    const hasDir = existsSync(dirStore);
+    const hasFile = existsSync(fileStore);
+    // Prefer the directory store (the current layout, and the one that carries v3
+    // sessions); still merge the other one in.
+    const dirUsable = hasDir && statSync(dirStore).isDirectory();
+    const fileUsable = hasFile && statSync(fileStore).isFile();
+    if (dirUsable) { storePath = dirStore; storeKind = "dir"; if (fileUsable) otherStorePath = fileStore; }
+    else if (fileUsable) { storePath = fileStore; storeKind = "file"; }
+    else { storePath = fileStore; storeKind = "file"; }
   }
   return {
     dshHome,
     sessionsRoot: opts.sessionsRoot || join(dshHome, "sessions"),
     storePath,
     storeKind,
+    otherStorePath,
   };
 }
 
@@ -757,6 +764,7 @@ interface Sources {
   usageById: Map<string, UsageRecord[]>;
   p2pById: Map<string, { p2p: boolean; mentions: number }>;
   stepCtxById: Map<string, { byStep: Record<string, { sys: number; tools: number; msg: number }>; window: number | null; post: Record<string, number> }>;
+  timelineById: Map<string, TurnTimeline>;
   compactionsById: Map<string, { events: CompactionEvent[]; prunes: number; prunedTokens: number }>;
   aggEvents: EventCounts;
   aggTools: Record<string, number>;
@@ -765,10 +773,11 @@ interface Sources {
 
 /** Read projcache + trajectories + default model once; compute the per-session contribution. */
 function loadSources(opts: ReportOptions = {}): Sources {
-  const { dshHome, sessionsRoot, storePath, storeKind } = resolvePaths(opts);
+  const { dshHome, sessionsRoot, storePath, storeKind, otherStorePath } = resolvePaths(opts);
   const defaultModel = readDefaultModel(dshHome);
   let pc: ProjcacheResult = { sessions: [], totals: pricing.emptyBuckets(), count: 0, nonZero: 0 };
-  if (existsSync(storePath)) { try { pc = projcache.readProjcache(storePath); } catch { /* keep empty */ } }
+  // Merge BOTH stores: they hold disjoint session sets (v0 -> legacy file, v3 -> dir).
+  try { pc = projcache.readProjcacheMerged({ primary: storePath, secondary: otherStorePath }); } catch { /* keep empty */ }
   // NB: no llama.cpp/llama-server log — per-step prefill/decode cost and local-model
   // naming come entirely from the trajectory's own timestamps/provider/model strings.
 
@@ -782,6 +791,7 @@ function loadSources(opts: ReportOptions = {}): Sources {
   const stepToolArgsById = new Map<string, Record<string, Record<string, number>>>(); // sessionId -> { "turn:step": { toolName: argsChars } }
   const stepToolsById = new Map<string, Record<string, string[]>>(); // sessionId -> { "turn:step": [toolNames] }
   const stepCtxById = new Map<string, { byStep: Record<string, { sys: number; tools: number; msg: number }>; window: number | null; post: Record<string, number> }>(); // sessionId -> per-step context allocation (chars) + window limit + post-compaction regime index per step
+  const timelineById = new Map<string, TurnTimeline>(); // sessionId -> per-turn prompt/response/outcome + the session event timeline
   const compactionsById = new Map<string, { events: CompactionEvent[]; prunes: number; prunedTokens: number }>(); // sessionId -> compaction events (existence + impact) + prune totals
   const p2pById = new Map<string, { p2p: boolean; mentions: number }>(); // sessionId -> P2P enablement evidence + mention volume
   const aggEvents = trajectory.emptyEvents();
@@ -817,6 +827,7 @@ function loadSources(opts: ReportOptions = {}): Sources {
       if (t.toolCallArgs && Object.keys(t.toolCallArgs).length) toolCallArgsById.set(id, t.toolCallArgs);
       if (t.stepToolArgs && Object.keys(t.stepToolArgs).length) stepToolArgsById.set(id, t.stepToolArgs);
       if (t.stepContext && Object.keys(t.stepContext).length) stepCtxById.set(id, { byStep: t.stepContext, window: t.contextWindow ?? null, post: t.postCompaction || {} });
+      if (t.timeline && (t.timeline.turns.length || t.timeline.events.length)) timelineById.set(id, t.timeline);
       if ((t.compactions && t.compactions.length) || t.prunes) compactionsById.set(id, { events: t.compactions || [], prunes: t.prunes || 0, prunedTokens: t.prunedTokens || 0 });
       if (t.p2p || t.p2pMentions) p2pById.set(id, { p2p: !!t.p2p, mentions: t.p2pMentions || 0 });
     }
@@ -832,7 +843,7 @@ function loadSources(opts: ReportOptions = {}): Sources {
 
   const contrib = buildContrib(pc, timelines, usageById, defaultModel);
   const byModel = aggregateContrib(contrib);
-  return { dshHome, sessionsRoot, storePath, storeKind, priceCfg, pc, traj, defaultModel, contrib, byModel, eventsById, toolsById, toolCallsById, toolCallArgsById, stepToolArgsById, stepToolsById, usageById, stepCtxById, compactionsById, p2pById, aggEvents, aggTools, aggToolCalls };
+  return { dshHome, sessionsRoot, storePath, storeKind, priceCfg, pc, traj, defaultModel, contrib, byModel, eventsById, toolsById, toolCallsById, toolCallArgsById, stepToolArgsById, stepToolsById, usageById, stepCtxById, timelineById, compactionsById, p2pById, aggEvents, aggTools, aggToolCalls };
 }
 
 /** What-if candidates: the user-chosen local baseline first, then every non-local model in the user's table. */
@@ -1115,8 +1126,36 @@ interface SessionBreakdownRow {
   compactionEvents: CompactionLite[];
   /** P2P (GPU peer-to-peer) enablement evidence found in this session's trajectory. */
   p2p: boolean;
+  /** Per-turn prompts/responses/outcomes + the session event timeline. Null when the trajectory had no turn records. */
+  turnTimeline: SessionTimeline | null;
   /** How many times "p2p" / "peer-to-peer" appears in the trajectory text. */
   p2pMentions: number;
+}
+
+/** Caps on the turn timeline shipped to the client (per session). */
+const TIMELINE_MAX_TURNS = 60;
+const TIMELINE_MAX_EVENTS = 400;
+
+/** The trimmed per-turn + event timeline a session drawer renders. */
+export interface SessionTimeline {
+  turns: trajectory.TurnDetail[];
+  events: trajectory.TimelineEvent[];
+  /** Pre-trim counts, so the drawer can say "showing 60 of 214 turns". */
+  totalTurns: number;
+  totalEvents: number;
+}
+
+/**
+ * Trim a parsed trajectory timeline down to what a drawer renders, and keep the
+ * payload bounded: long turns are capped (the drawer shows the first N turns with
+ * a "more" line) and the event list is capped oldest-first. Returns null when the
+ * session has no timeline, so the client can skip the section entirely.
+ */
+function sessionTimeline(tl: TurnTimeline | undefined): SessionTimeline | null {
+  if (!tl) return null;
+  const turns = tl.turns.slice(0, TIMELINE_MAX_TURNS).map((t) => ({ ...t }));
+  const events = tl.events.slice(0, TIMELINE_MAX_EVENTS).map((e) => ({ ...e }));
+  return { turns, events, totalTurns: tl.turns.length, totalEvents: tl.events.length };
 }
 
 /**
@@ -1126,7 +1165,7 @@ interface SessionBreakdownRow {
  * - byDay:     aggregate by local calendar day.
  */
 export function buildBreakdown(opts: ReportOptions = {}) {
-  const { dshHome, pc, traj, defaultModel, contrib, byModel, eventsById, toolsById, toolCallsById, toolCallArgsById, stepToolArgsById, stepToolsById, usageById, stepCtxById, compactionsById, p2pById, aggEvents, aggTools, aggToolCalls } = loadSources(opts);
+  const { dshHome, pc, traj, defaultModel, contrib, byModel, eventsById, toolsById, toolCallsById, toolCallArgsById, stepToolArgsById, stepToolsById, usageById, stepCtxById, timelineById, compactionsById, p2pById, aggEvents, aggTools, aggToolCalls } = loadSources(opts);
   const archivedIds = readArchivedSessions(dshHome);
   const contribById = new Map(contrib.map((c) => [c.id, c]));
   const fallbackLabel = "Qwen 3.8 27B (local)";
@@ -1320,6 +1359,7 @@ export function buildBreakdown(opts: ReportOptions = {}) {
         toolTokens,
         steps,
         stepTree,
+        turnTimeline: sessionTimeline(timelineById.get(s.id)),
         archived: archivedIds.has(s.id),
         compactions: _comp ? _comp.events.length : 0,
         compactedTokens: _comp ? _comp.events.reduce((n, e) => n + (e.shadowedTokens || 0), 0) : 0,

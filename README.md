@@ -56,6 +56,63 @@ activity modal with tabs: **Events**, **Cost**, **Models**, **Performance**, **T
 **Combined**, **Daily** (a GitHub-style calendar heatmap of token usage per day — hover a day for its
 combined stats, click to filter the per-session table to it), **Sessions**, and **Pricing**.
 
+## Turn outline & the event timeline
+
+Every session drawer (Daily, Combined, Performance, Tokens, Sessions, Cost …) opens with a **Turn
+outline & events** section: one card per turn with its outcome badge (completed / in progress /
+aborted / blocked / error / max tokens / interrupted), the prompt, the response (or the tools a
+tool-only step called), the wall time and the step count — then that turn's compact event chips.
+Events that belong to no turn (the system prompt, the session title) sit on a session-level row.
+The per-turn → step table repeats the outcome badge and the first four event icons on each Turn
+header row.
+
+Events come from the trajectory records the parser previously only tallied:
+
+| chip | source record | example |
+| --- | --- | --- |
+| ⚠ error | `turn/end` with a non-completed reason; failed `compaction/end` | `aborted — stopped by user` |
+| ■ user-stop | `turn/end` aborted by the user | `Turn stopped by user` |
+| ↻ retry | `llm/retry` | `Retry 1/5 · TRANSPORT: terminated (after 504ms)` |
+| ✋ approval | `approval/asked` + `approval/decided` | `Approval asked · bash — escalate sandbox…` |
+| ✂ compaction / prune | `compaction/*` | `Compaction summary — 3226 tokens shadowed` |
+| ☑ todo | `todo/write` | `Todo list written — 3 items` |
+| ⌘ command | `command/done` | `Command success: Compacted 54 history items` |
+| 🏷 title | `session/title` | `Session title: … (provider)` |
+| ⇄ model | `model/selection` | `Model → deepseek-v4-pro · …` |
+| 📦 deliverable | `deliverables/presented` | `Deliverables presented — 6 files` |
+| ⚙ system | `system/message` (v3) | `System prompt — 8466 chars` |
+
+A session whose trajectory has no turn records (older sessions) still shows its turns, derived from
+the step tree, without prompts.
+
+## Trajectory formats & shape snapshots
+
+Token Gobbler reads DSH session trajectories from `~/.dsh/sessions/<workspace>/<session-id>/`. DSH
+has shipped two on-disk shapes, parsed by the same pass:
+
+- **v0** — `session.jsonl.zstd`: one TOP-LEVEL record per streaming chunk (`assistant/chunk` with
+  `chunk.type` `usage`/`finish`/…, plus `text-chunks` / `tool-call-chunks` / `reasoning-chunks`).
+  The per-step tokens live in the usage chunk and the serving model in
+  `chunk.finish.replayState.response`.
+- **v3** — `session.v3.jsonl.zstd` (current): the stream is NESTED in
+  `assistant/message.data.stream` and `data.usage` mirrors its usage chunk; `finish` no longer
+  carries `replayState` (the model is on `message.source`), the system prompt moved from
+  `request/header` to a `system/message` record, and the header gained `isSeeded`. A directory
+  holding both files parses the v3 copy only.
+
+Because a format change used to look identical to "the numbers went to zero", every parse also
+records the SHAPE of what it read. Snapshot it and diff an upgrade against it:
+
+```bash
+npm run report:shape                                       # shape of what is on disk right now
+node scripts/trajectory-shape.js --out docs/trajectory-shapes.md
+node scripts/trajectory-shape.js --compare docs/trajectory-shapes.md
+# exit 0 = the format did not move; exit 1 = a record type / field / value set / stream kind changed
+```
+
+The manifest is Markdown for reading and carries the machine-readable snapshot in a fenced block.
+See `lib/trajectory.ts` (the "FORMAT VERSIONS" header) for the field-level differences.
+
 ## Pricing
 
 ```
@@ -95,12 +152,14 @@ Edit the `.ts` sources, never the generated `.js`.
 ```
 client/*.ts(x)     web dashboard (TypeScript, bundled by esbuild)
 lib/index.ts       host: /token-gobbler/* routes
-lib/trajectory.ts  zstd trajectory reader/parser
+lib/trajectory.ts  zstd trajectory reader/parser (v0 + v3) + shape capture
 lib/projcache.ts   projection-store reader
 lib/pricing.ts     rate cards + cost math
 lib/report.ts      aggregate + attribution + pricing
 lib/client.js      GENERATED (esbuild); do not edit
 bin/token-gobbler.js  CLI (pretty/--json/--days/--breakdown)
+scripts/trajectory-shape.js  trajectory shape snapshot/diff CLI
+docs/trajectory-shapes.md    the pinned shape manifest (`npm run report:shape`)
 test/report.test.js   node --test suite
 ```
 

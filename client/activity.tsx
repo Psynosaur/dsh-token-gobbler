@@ -4,11 +4,12 @@
 import { CSS, NS, text, fmt, fmtC, money, fmtMs, statCard, eventChips, toolTable, segBtn, request, humanizeModel, badgeGrid, thL, thR, tdL, tdR } from "./core";
 import { SessionTable } from "./session-table";
 import { aggregateSessions, daySeries as buildDaySeries, dayStr } from "./agg";
-import { perfDrawer, tokenTreeDrawer, combinedDrawer, Collapse, TokenSpendChart } from "./drawers";
+import { combinedDrawer } from "./drawers";
 import { AmBarChart } from "./amchart";
-import { realModelTable, perfModelTable, perfSessionTable, comparisonTable, sessionTable, dayTable, pricingTab, costCard, costModelTable } from "./panels";
+import { comparisonTable, sessionTable, dayTable, dayChart, sessionChart, pricingTab, costCard, costModelTable } from "./panels";
 import { DailyTab } from "./daily";
 import { RunsTab } from "./runs";
+import { LlamaMetricsTab } from "./llama-metrics";
 import { useGobblerData, activityRef } from "./hooks";
 
 export function TokenGobblerSettings(props: any) {
@@ -219,7 +220,23 @@ export function TokenGobblerModal({ onClose, initialTab, initialDay }: { onClose
     const byDay = (breakdown && breakdown.byDay) || [];
     const events = data.events || (breakdown && breakdown.events) || null;
     const tools = data.tools || (breakdown && breakdown.tools) || [];
+    const wfh = (data.split && data.split.wfh) || { sessions: 0, tokens: 0, cost: 0, corpCost: null, saved: null, referenceLabel: null };
+    const cop = (data.split && data.split.corp) || { sessions: 0, tokens: 0, cost: 0 };
+    const sv = data.savings;
+    const refLabel = wfh.referenceLabel || "corp";
+    // Overview tab (replaces Events): event chips, top tools, cost summary cards, recent activity
+    const recentSessions = [...bySession].sort((a, b) => {
+      const ta = a.meta?.lastPromptAt ?? a.createdAt ?? 0;
+      const tb = b.meta?.lastPromptAt ?? b.createdAt ?? 0;
+      return (typeof tb === "string" ? Date.parse(tb) : tb) - (typeof ta === "string" ? Date.parse(ta) : ta);
+    }).slice(0, 5);
     const eventsTab = jsxs("div", { style: { display: "flex", flexDirection: "column", gap: 24 }, children: [
+      badgeGrid([
+        costCard("WFH compute (local)", money(wfh.cost), fmt(wfh.sessions) + " sessions · " + fmtC(wfh.tokens) + " tokens", "#34d399"),
+        costCard("Corp (billed)", money(cop.cost), fmt(cop.sessions) + " sessions · " + fmtC(cop.tokens) + " tokens", "#f87171"),
+        costCard("Total actual", money(data.actual.cost), "priced from " + data.actual.source, "#fbbf24"),
+        costCard("WFH savings", money(wfh.saved != null ? wfh.saved : 0), "local tokens at " + refLabel + " rates vs home lab", "#34d399"),
+      ]),
       jsxs("div", { children: [
         jsx("div", { className: "tg-label", style: { marginBottom: 12 }, children: "Activity by event type" }),
         eventChips(events),
@@ -228,12 +245,22 @@ export function TokenGobblerModal({ onClose, initialTab, initialDay }: { onClose
         jsx("div", { className: "tg-label", style: { marginBottom: 12 }, children: "Top tools (what actually ran)" }),
         toolTable(tools, true),
       ]}),
+      jsxs("div", { children: [
+        jsx("div", { className: "tg-label", style: { marginBottom: 12 }, children: "Recent sessions" }),
+        recentSessions.length > 0
+          ? SessionTable({
+              rows: recentSessions,
+              expandedId: openSession, onToggle: setOpenSession,
+              drawer: combinedDrawer,
+              page: pageFor("overviewSess"), setPage: setPageFor("overviewSess"), pageSize: 5,
+              columns: { turns: false, decode: false, prefill: false, runtime: false, total: true, lastActive: true },
+            })
+          : jsx("div", { className: "tg-muted", style: { fontSize: 13, padding: "12px 4px" }, children: "No recent sessions." }),
+      ]}),
     ]});
-    const modelsTab = jsxs("div", { style: { display: "flex", flexDirection: "column", gap: 22 }, children: [
-      jsxs("div", { children: [jsx("div", { className: "tg-label", style: { marginBottom: 10 }, children: "What you actually ran (real mix)" }), realModelTable(data.byModel)] }),
-      jsxs("div", { children: [jsx("div", { className: "tg-label", style: { marginBottom: 10 }, children: "What it would cost the corp" }), comparisonTable(data.comparison)] }),
-    ]});
-    const sessionsTab = sessionTable(bySession, openSession, setOpenSession);
+    // Models tab merged into Cost tab (Phase 2)
+    // The Cost tab already has costModelTable (more detailed) and comparisonTable
+    // Sessions tab removed (Phase 3) - per-session tables live in Cost, Performance, Daily tabs
     const unpriced = (data.byModel || []).filter((m: any) => m.cost == null);
     const pricingTabEl = pricingTab({
       draft, setDraft, saving, saveMsg,
@@ -245,11 +272,17 @@ export function TokenGobblerModal({ onClose, initialTab, initialDay }: { onClose
       fromFile: draft ? draft.fromFile : false,
       discovering, discoverMsg, onDiscover: discoverLocal,
     });
-    const wfh = (data.split && data.split.wfh) || { sessions: 0, tokens: 0, cost: 0, corpCost: null, saved: null, referenceLabel: null };
-    const cop = (data.split && data.split.corp) || { sessions: 0, tokens: 0, cost: 0 };
-    const sv = data.savings;
-    const refLabel = wfh.referenceLabel || "corp";
     const costTab = jsxs("div", { style: { display: "flex", flexDirection: "column", gap: 24 }, children: [
+      jsxs("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 20 }, children: [
+        jsxs("div", { children: [
+          jsx("div", { className: "tg-label", style: { marginBottom: 10 }, children: "Cost by day" }),
+          dayChart(byDay),
+        ]}),
+        jsxs("div", { children: [
+          jsx("div", { className: "tg-label", style: { marginBottom: 10 }, children: "Cost by session" }),
+          sessionChart(bySession),
+        ]}),
+      ]}),
       badgeGrid([
         costCard("WFH compute (local)", money(wfh.cost), fmt(wfh.sessions) + " sessions · " + fmtC(wfh.tokens) + " tokens", "#34d399"),
         costCard("Corp (billed)", money(cop.cost), fmt(cop.sessions) + " sessions · " + fmtC(cop.tokens) + " tokens", "#f87171"),
@@ -266,191 +299,114 @@ export function TokenGobblerModal({ onClose, initialTab, initialDay }: { onClose
         comparisonTable(data.comparison),
         sv && sv.max > 0 ? jsx("div", { style: { color: "#34d399", fontSize: 13, marginTop: 12, fontWeight: 600 }, children: "💰 You save " + (sv.min > 0 && sv.min < sv.max ? money(sv.min) + "–" + money(sv.max) : money(sv.max)) + " by running local instead of the corp." }) : null,
       ]}),
+    ]});
+    // Shared variables for the merged Performance tab (over-time charts + badges)
+    const mSec = data.sources && data.sources.projcache ? data.sources.projcache.sessions : (breakdown && breakdown.bySession ? breakdown.bySession.length : 0);
+    const evC = data.events || null;
+    const stepsN = (evC && evC.steps) || 0;
+    const turnsN = (evC && evC.turns) || 0;
+    const T = data.totals || {};
+    const tin = T.uncachedInputTokens || 0;
+    const tout = T.outputTokens || 0;
+    const tc = (T.cacheReadTokens || 0) + (T.cacheWriteTokens || 0);
+    const tAll = T.allTokens || (tin + tout + tc);
+    const mRows = data.byModel || [];
+    // Thinking total: sum the step trees' thinking (authoritative reasoningTokens + the
+    // chars/4 estimate when the provider reports 0) so the summary badge matches the
+    // per-session drawer. byModel.reasoningTokens only carries exact-usage reasoning.
+    const tThink = aggregateSessions(bySession).tthink;
+    const toolAgg = (breakdown && breakdown.toolTokensAggregate) || [];
+    const tTools = toolAgg.reduce((n: number, t: any) => n + (t.total || 0), 0);
+    const dec = data.decode || {};
+    const pre = data.prefill || {};
+    const fastest = mRows.filter((m: any) => m.tokPerSec != null).sort((a: any, b: any) => b.tokPerSec - a.tokPerSec)[0] || null;
+    const avg = (tot: number, denom: number) => (denom > 0 ? Math.round(tot / denom) : null);
+    // Per-day series for the over-time charts — shared aggregation (client/agg.ts).
+    const daySeries = buildDaySeries(bySession);
+    const overTime = jsxs("div", { style: { display: "flex", flexDirection: "column", gap: 20 }, children: [
       jsxs("div", { children: [
-        jsx("div", { className: "tg-label", style: { marginBottom: 10 }, children: "Cost by day" }),
-        dayTable(byDay),
+        jsx("div", { className: "tg-faint", style: { fontSize: 11, marginBottom: 8 }, children: "Daily totals of the token badges (In / Out / Cache / Think / Total) across every session." }),
+        jsx(AmBarChart, {
+          data: daySeries,
+          categoryField: "date",
+          kind: "line",
+          smooth: true,
+          log: true,
+          unit: "tok",
+          series: [
+            { key: "in", label: "In", color: "#60a5fa", unit: "tok", axis: 0 },
+            { key: "out", label: "Out", color: "#a78bfa", unit: "tok", axis: 0 },
+            { key: "cache", label: "Cache", color: "#2dd4bf", unit: "tok", axis: 0 },
+            { key: "think", label: "Think", color: "#c084fc", unit: "tok", axis: 0 },
+            { key: "total", label: "Total", color: "#fbbf24", unit: "tok", axis: 0 },
+          ],
+          height: 220,
+        }),
       ]}),
       jsxs("div", { children: [
-        jsx("div", { className: "tg-label", style: { marginBottom: 10 }, children: "Cost by session" }),
-        sessionTable(bySession, openSession, setOpenSession),
+        jsx("div", { className: "tg-label", style: { marginBottom: 8 }, children: "📈 Over time — speed" }),
+        jsx("div", { className: "tg-faint", style: { fontSize: 11, marginBottom: 8 }, children: "Daily decode & prefill speed (tok/s) and average TTFT (seconds)." }),
+        jsx(AmBarChart, {
+          data: daySeries,
+          categoryField: "date",
+          kind: "line",
+          smooth: true,
+          unit: "tok/s",
+          series: [
+            { key: "decode", label: "Decode", color: "#38bdf8", unit: "tok/s", axis: 0 },
+            { key: "prefill", label: "Prefill", color: "#2dd4bf", unit: "tok/s", axis: 0 },
+            { key: "ttft", label: "Avg TTFT", color: "#fbbf24", unit: "s", axis: 1 },
+          ],
+          height: 190,
+        }),
       ]}),
     ]});
-    const performanceTabEl = perf === undefined
-      ? jsx("div", { style: { padding: 40, color: "#94a3b8", textAlign: "center" }, children: "Counting the gobbled tokens…" })
-      : perf === null
-        ? jsx("div", { style: { padding: 40, color: "#94a3b8", textAlign: "center" }, children: "Performance data unavailable — restart the web server (dsh web) to enable the Performance tab." })
-        : perf && perf.__error
-          ? jsx("div", { style: { padding: 40, color: "#f87171", textAlign: "center" }, children: "Performance data failed to load: " + perf.__error })
-          : jsxs("div", { style: { display: "flex", flexDirection: "column", gap: 24 }, children: [
-          badgeGrid([
-            costCard("Decode speed (avg)", perf.totals.decode.tokPerSec != null ? perf.totals.decode.tokPerSec + " tok/s" : "—", fmtC(perf.totals.decode.tokens) + " streamed tokens · " + fmtMs(perf.totals.decode.ms), "#fbbf24"),
-            costCard("Prompt processing (avg)", perf.totals.prefill.tokPerSec != null ? perf.totals.prefill.tokPerSec + " tok/s" : "—", fmtC(perf.totals.prefill.tokens) + " new ctx tokens · " + fmtMs(perf.totals.prefill.ms) + " of TTFT" + (perf.totals.prefill.avgTtftMs != null ? " · avg " + fmtMs(perf.totals.prefill.avgTtftMs) : ""), "#2dd4bf"),
-          ]),
-          jsxs("div", { children: [
-            jsx("div", { className: "tg-label", style: { marginBottom: 10 }, children: "Performance by model" }),
-            jsx(AmBarChart, {
-              data: (perf.byModel || []).map((m: any) => ({ cat: m.label, decode: m.tokPerSec ?? 0, prefill: m.promptTokPerSec ?? 0 })),
-              categoryField: "cat",
-              series: [
-                { key: "decode", label: "Decode", color: "#38bdf8", unit: "tok/s", axis: 0 },
-                { key: "prefill", label: "Prefill", color: "#2dd4bf", unit: "tok/s", axis: 0 },
-              ],
-              height: 240,
-            }),
-            jsx(Collapse, { label: "Show model table", children: perfModelTable(perf.byModel) }),
-          ]}),
-          jsxs("div", { children: [
-            jsx("div", { className: "tg-label", style: { marginBottom: 10 }, children: "All steps — expand a session to see its turn/step tree with tool calls + prefill/decode" }),
-            SessionTable({
-              columns: { turns: true, runtime: false, total: false },
-              rows: bySession.filter((s: any) => s.steps && s.steps.length),
-              expandedId: openSession, onToggle: setOpenSession,
-              drawer: perfDrawer,
-              page: pageFor("perfTree"), setPage: setPageFor("perfTree"), pageSize: 25,
-              empty: jsx("div", { className: "tg-muted", style: { fontSize: 13, padding: "12px 4px" }, children: "No per-step timing yet — sessions with per-turn usage will appear here." }),
-            }),
-          ]}),
-          jsx("div", { className: "tg-faint", style: { fontSize: 11, lineHeight: 1.6 }, children:
-            "Decode = streamed output tokens ÷ decode time (first→last chunk). Prefill = new (uncached) input tokens ÷ TTFT (request→first token) — TTFT includes network + queue, so prefill speed is a lower bound on the model's true prompt-processing rate. Cached context is served from the provider's cache and isn't counted as new work. Only sessions with per-turn usage carry timing." }),
-        ]});
 
-    // Tokens tab: table rows (run summary) whose drawer expands the CLI turn → step tree.
-    // Top-10 models by total tokens (byModel is already sorted desc by allTokens).
-    const tokenModelRows = (data.byModel || []).slice(0, 10).map((m: any) => ({
-      label: m.label,
-      in: m.uncachedInputTokens ?? 0,
-      out: m.outputTokens ?? 0,
-      cache: (m.cacheReadTokens ?? 0) + (m.cacheWriteTokens ?? 0),
-      think: m.reasoningTokens ?? 0,
-    }));
-    const tokensTab = jsxs("div", { style: { display: "flex", flexDirection: "column", gap: 16 }, children: [
-      tokenModelRows.length ? jsxs("div", { children: [
-        jsx("div", { className: "tg-label", style: { marginBottom: 4 }, children: "Token spend by model — top 10 (all sessions)" }),
-        jsx("div", { className: "tg-faint", style: { fontSize: 11, marginBottom: 8 }, children: "Top 10 models by total tokens. Each model's in / out / cache / thinking summed across every session. Thinking = reasoning tokens (exact-usage sessions only); it is a subdivision of Out, shown separately for insight." }),
-        jsx(TokenSpendChart, { rows: tokenModelRows, horizontal: true, hideCategoryLabels: true, height: Math.min(440, 150 + tokenModelRows.length * 22) }),
-      ]}) : null,
+    // Merged Performance tab: over-time charts + speed/token badges + unified per-session table
+    // (replaces separate Performance, Tokens, and Combined tabs)
+    const performanceTabEl = jsxs("div", { style: { display: "flex", flexDirection: "column", gap: 24 }, children: [
+      overTime,
       jsxs("div", { children: [
-        jsx("div", { className: "tg-label", style: { marginBottom: 4 }, children: "Token breakdown — per turn & step" }),
-        jsx("div", { className: "tg-faint", style: { fontSize: 11 }, children: "Each row is a session; click to expand it. The drawer shows a summary + the breakdown per turn → step — every turn is a collapsible row, each LLM step a row showing the tools it called and the context tokens it moved (in / out / cache)." }),
+        jsx("div", { className: "tg-label", style: { marginBottom: 10 }, children: "⚡ Speed — totals & averages" }),
+        badgeGrid([
+          costCard("Decode speed (avg)", dec.tokPerSec != null ? dec.tokPerSec + " tok/s" : "—", fmtC(dec.tokens) + " streamed · " + fmtMs(dec.ms), "#fbbf24"),
+          costCard("Prompt processing (avg)", pre.tokPerSec != null ? pre.tokPerSec + " tok/s" : "—", fmtC(pre.tokens) + " new ctx · " + fmtMs(pre.ms) + " TTFT", "#2dd4bf"),
+          costCard("Avg TTFT", pre.avgTtftMs != null ? fmtMs(pre.avgTtftMs) : "—", "request → first token", "#38bdf8"),
+          costCard("Fastest model", fastest ? fastest.label + " · " + fastest.tokPerSec + " tok/s" : "—", fastest ? "best decode rate" : "no timing yet", "#a78bfa"),
+          costCard("Streamed tokens", fmtC(dec.tokens), "outputs · " + (dec.steps || 0) + " decode steps", "#60a5fa"),
+          costCard("New context tokens", fmtC(pre.tokens), "uncached input · " + (pre.steps || 0) + " prefill steps", "#34d399"),
+        ]),
       ]}),
-      SessionTable({
-        columns: { decode: false, prefill: false, runtime: false },
-        rows: bySession.filter((s: any) => s.toolTokens && s.toolTokens.length),
-        expandedId: openToken, onToggle: setOpenToken,
-        drawer: tokenTreeDrawer,
-        page: pageFor("tokSess"), setPage: setPageFor("tokSess"), pageSize: 25,
-        empty: jsx("div", { className: "tg-muted", style: { fontSize: 13, padding: "12px 4px" }, children: "No per-step token data yet — appears once sessions record per-turn usage." }),
-      }),
-      jsx("div", { className: "tg-faint", style: { fontSize: 11, lineHeight: 1.6 }, children: "Tokens = the LLM step's full context attribution for the tools called in that step. Thinking = reasoning tokens (≈ estimated from reasoning text when the provider reports 0)." }),
+      jsxs("div", { children: [
+        jsx("div", { className: "tg-label", style: { marginBottom: 10 }, children: "🪙 Tokens — totals & averages" }),
+        badgeGrid([
+          costCard("Input (uncached)", fmtC(tin), "total", "#60a5fa"),
+          costCard("Output", fmtC(tout), "total", "#a78bfa"),
+          costCard("Cache (read+write)", fmtC(tc), "total", "#2dd4bf"),
+          costCard("Thinking", fmtC(tThink), "reasoning tokens", "#c084fc"),
+          costCard("Tools (payload)", fmtC(tTools), "tool-call args (chars/4)", "#34d399"),
+          costCard("Total tokens", fmtC(tAll), "all buckets", "#fbbf24"),
+          costCard("Avg tokens / session", avg(tAll, mSec) != null ? fmtC(avg(tAll, mSec)) : "—", mSec + " sessions", "#fbbf24"),
+          costCard("Avg tokens / step", avg(tAll, stepsN) != null ? fmtC(avg(tAll, stepsN)) : "—", stepsN + " LLM steps", "#fb923c"),
+          costCard("Avg tokens / turn", avg(tAll, turnsN) != null ? fmtC(avg(tAll, turnsN)) : "—", turnsN + " turns", "#f472b6"),
+        ]),
+        jsx("div", { className: "tg-faint", style: { fontSize: 11, marginTop: 10, lineHeight: 1.6 }, children: "Averages = grand total ÷ that granularity (session / LLM step / turn). Thinking = reasoning tokens (exact-usage sessions only; a chars/4 estimate otherwise). Tools = estimated tokens of the actual tool-call arguments (chars/4), NOT the whole step context. Speed badges come from /usage; the per-session detail below comes from /breakdown." }),
+      ]}),
+      jsxs("div", { children: [
+        jsx("div", { className: "tg-label", style: { marginBottom: 10 }, children: "Per session — expand for the unified turn → step table (tokens + speed)" }),
+        SessionTable({
+          rows: bySession.filter((s: any) => ((s.stepTree && s.stepTree.length) || (s.toolTokens && s.toolTokens.length))),
+          expandedId: openToken, onToggle: setOpenToken,
+          drawer: combinedDrawer,
+          page: pageFor("combSess"), setPage: setPageFor("combSess"), pageSize: 25,
+          empty: jsx("div", { className: "tg-muted", style: { fontSize: 13, padding: "12px 4px" }, children: "No combined per-step data yet — appears once sessions record per-turn usage." }),
+        }),
+      ]}),
     ]});
-    // ── TEMP Combined tab: merges Performance (speed) + Tokens (usage) ──
-    // The landing is BADGES of speed + token totals/averages (not a chart). Below,
-    // a per-session table expands into the unified per-turn → step drawer that
-    // surfaces every property of both source tabs.
-    const combined = (() => {
-      const mSec = data.sources && data.sources.projcache ? data.sources.projcache.sessions : (breakdown && breakdown.bySession ? breakdown.bySession.length : 0);
-      const evC = data.events || null;
-      const stepsN = (evC && evC.steps) || 0;
-      const turnsN = (evC && evC.turns) || 0;
-      const T = data.totals || {};
-      const tin = T.uncachedInputTokens || 0;
-      const tout = T.outputTokens || 0;
-      const tc = (T.cacheReadTokens || 0) + (T.cacheWriteTokens || 0);
-      const tAll = T.allTokens || (tin + tout + tc);
-      const mRows = data.byModel || [];
-      // Thinking total: sum the step trees' thinking (authoritative reasoningTokens + the
-      // chars/4 estimate when the provider reports 0) so the summary badge matches the
-      // per-session drawer. byModel.reasoningTokens only carries exact-usage reasoning.
-      const tThink = aggregateSessions(bySession).tthink;
-      const toolAgg = (breakdown && breakdown.toolTokensAggregate) || [];
-      const tTools = toolAgg.reduce((n: number, t: any) => n + (t.total || 0), 0);
-      const dec = data.decode || {};
-      const pre = data.prefill || {};
-      const fastest = mRows.filter((m: any) => m.tokPerSec != null).sort((a: any, b: any) => b.tokPerSec - a.tokPerSec)[0] || null;
-      const avg = (tot: number, denom: number) => (denom > 0 ? Math.round(tot / denom) : null);
-      // Per-day series for the over-time charts — shared aggregation (client/agg.ts).
-      const daySeries = buildDaySeries(bySession);
-      const overTime = jsxs("div", { style: { display: "flex", flexDirection: "column", gap: 20 }, children: [
-        jsxs("div", { children: [
-          // jsx("div", { className: "tg-label", style: { marginBottom: 8 }, children: "📈 Over time — token usage" }),
-          jsx("div", { className: "tg-faint", style: { fontSize: 11, marginBottom: 8 }, children: "Daily totals of the token badges (In / Out / Cache / Think / Total) across every session." }),
-          jsx(AmBarChart, {
-            data: daySeries,
-            categoryField: "date",
-            kind: "line",
-            smooth: true,
-            log: true,
-            unit: "tok",
-            series: [
-              { key: "in", label: "In", color: "#60a5fa", unit: "tok", axis: 0 },
-              { key: "out", label: "Out", color: "#a78bfa", unit: "tok", axis: 0 },
-              { key: "cache", label: "Cache", color: "#2dd4bf", unit: "tok", axis: 0 },
-              { key: "think", label: "Think", color: "#c084fc", unit: "tok", axis: 0 },
-              { key: "total", label: "Total", color: "#fbbf24", unit: "tok", axis: 0 },
-            ],
-            height: 220,
-          }),
-        ]}),
-        jsxs("div", { children: [
-          jsx("div", { className: "tg-label", style: { marginBottom: 8 }, children: "📈 Over time — speed" }),
-          jsx("div", { className: "tg-faint", style: { fontSize: 11, marginBottom: 8 }, children: "Daily decode & prefill speed (tok/s) and average TTFT (seconds)." }),
-          jsx(AmBarChart, {
-            data: daySeries,
-            categoryField: "date",
-            kind: "line",
-            smooth: true,
-            unit: "tok/s",
-            series: [
-              { key: "decode", label: "Decode", color: "#38bdf8", unit: "tok/s", axis: 0 },
-              { key: "prefill", label: "Prefill", color: "#2dd4bf", unit: "tok/s", axis: 0 },
-              { key: "ttft", label: "Avg TTFT", color: "#fbbf24", unit: "s", axis: 1 },
-            ],
-            height: 190,
-          }),
-        ]}),
-      ]});
-      return jsxs("div", { style: { display: "flex", flexDirection: "column", gap: 24 }, children: [
-        overTime,
-        jsxs("div", { children: [
-          jsx("div", { className: "tg-label", style: { marginBottom: 10 }, children: "⚡ Speed — totals & averages" }),
-          badgeGrid([
-            costCard("Decode speed (avg)", dec.tokPerSec != null ? dec.tokPerSec + " tok/s" : "—", fmtC(dec.tokens) + " streamed · " + fmtMs(dec.ms), "#fbbf24"),
-            costCard("Prompt processing (avg)", pre.tokPerSec != null ? pre.tokPerSec + " tok/s" : "—", fmtC(pre.tokens) + " new ctx · " + fmtMs(pre.ms) + " TTFT", "#2dd4bf"),
-            costCard("Avg TTFT", pre.avgTtftMs != null ? fmtMs(pre.avgTtftMs) : "—", "request → first token", "#38bdf8"),
-            costCard("Fastest model", fastest ? fastest.label + " · " + fastest.tokPerSec + " tok/s" : "—", fastest ? "best decode rate" : "no timing yet", "#a78bfa"),
-            costCard("Streamed tokens", fmtC(dec.tokens), "outputs · " + (dec.steps || 0) + " decode steps", "#60a5fa"),
-            costCard("New context tokens", fmtC(pre.tokens), "uncached input · " + (pre.steps || 0) + " prefill steps", "#34d399"),
-          ]),
-        ]}),
-        jsxs("div", { children: [
-          jsx("div", { className: "tg-label", style: { marginBottom: 10 }, children: "🪙 Tokens — totals & averages" }),
-          badgeGrid([
-            costCard("Input (uncached)", fmtC(tin), "total", "#60a5fa"),
-            costCard("Output", fmtC(tout), "total", "#a78bfa"),
-            costCard("Cache (read+write)", fmtC(tc), "total", "#2dd4bf"),
-            costCard("Thinking", fmtC(tThink), "reasoning tokens", "#c084fc"),
-            costCard("Tools (payload)", fmtC(tTools), "tool-call args (chars/4)", "#34d399"),
-            costCard("Total tokens", fmtC(tAll), "all buckets", "#fbbf24"),
-            costCard("Avg tokens / session", avg(tAll, mSec) != null ? fmtC(avg(tAll, mSec)) : "—", mSec + " sessions", "#fbbf24"),
-            costCard("Avg tokens / step", avg(tAll, stepsN) != null ? fmtC(avg(tAll, stepsN)) : "—", stepsN + " LLM steps", "#fb923c"),
-            costCard("Avg tokens / turn", avg(tAll, turnsN) != null ? fmtC(avg(tAll, turnsN)) : "—", turnsN + " turns", "#f472b6"),
-          ]),
-          jsx("div", { className: "tg-faint", style: { fontSize: 11, marginTop: 10, lineHeight: 1.6 }, children: "Averages = grand total ÷ that granularity (session / LLM step / turn). Thinking = reasoning tokens (exact-usage sessions only; a chars/4 estimate otherwise). Tools = estimated tokens of the actual tool-call arguments (chars/4), NOT the whole step context. Speed badges come from /usage; the per-session detail below comes from /breakdown." }),
-        ]}),
-        jsxs("div", { children: [
-          jsx("div", { className: "tg-label", style: { marginBottom: 10 }, children: "Per session — expand for the unified turn → step table (tokens + speed)" }),
-          SessionTable({
-            rows: bySession.filter((s: any) => ((s.stepTree && s.stepTree.length) || (s.toolTokens && s.toolTokens.length))),
-            expandedId: openToken, onToggle: setOpenToken,
-            drawer: combinedDrawer,
-            page: pageFor("combSess"), setPage: setPageFor("combSess"), pageSize: 25,
-            empty: jsx("div", { className: "tg-muted", style: { fontSize: 13, padding: "12px 4px" }, children: "No combined per-step data yet — appears once sessions record per-turn usage." }),
-          }),
-        ]}),
-      ]});
-    })();
+
     const runsTab = jsx(RunsTab, { bySession });
-    body = tab === "events" ? eventsTab : tab === "cost" ? costTab : tab === "models" ? modelsTab : tab === "performance" ? performanceTabEl : tab === "tokens" ? tokensTab : tab === "combined" ? combined : tab === "runs" ? runsTab : tab === "daily" ? jsx(DailyTab, { bySession, initialDay }) : tab === "pricing" ? pricingTabEl : sessionsTab;
+    const llamaTab = jsx(LlamaMetricsTab, {});
+    body = tab === "events" ? eventsTab : tab === "cost" ? costTab : tab === "performance" ? performanceTabEl : tab === "runs" ? runsTab : tab === "daily" ? jsx(DailyTab, { bySession, initialDay }) : tab === "llama" ? llamaTab : pricingTabEl;
   }
 
   return jsxs("div", { className: "tg-modal-overlay", role: "presentation", children: [
@@ -468,7 +424,7 @@ export function TokenGobblerModal({ onClose, initialTab, initialDay }: { onClose
         ]}),
       ]}),
       reprocessMsg ? jsx("div", { className: "tg-faint", style: { fontSize: 11, padding: "0 20px 10px" }, children: reprocessMsg }) : null,
-      jsx("div", { className: "tg-seg", style: { margin: "0 20px 16px" }, children: [segBtn(tab, setTab, "events", "Events"), segBtn(tab, setTab, "cost", "Cost"), segBtn(tab, setTab, "models", "Models"), segBtn(tab, setTab, "performance", "Performance"), segBtn(tab, setTab, "tokens", "Tokens"), segBtn(tab, setTab, "combined", "Combined (wip)"), segBtn(tab, setTab, "runs", "Runs"), segBtn(tab, setTab, "daily", "Daily"), segBtn(tab, setTab, "sessions", "Sessions"), segBtn(tab, setTab, "pricing", "Pricing")] }),
+      jsx("div", { className: "tg-seg", style: { margin: "0 20px 16px" }, children: [segBtn(tab, setTab, "events", "Overview"), segBtn(tab, setTab, "cost", "Cost"), segBtn(tab, setTab, "performance", "Performance"), segBtn(tab, setTab, "runs", "Runs"), segBtn(tab, setTab, "daily", "Daily"), segBtn(tab, setTab, "llama", "Llama Metrics"), segBtn(tab, setTab, "pricing", "Settings")] }),
       jsx("div", { className: "tg-modal-body", children: body }),
     ]}),
   ]});

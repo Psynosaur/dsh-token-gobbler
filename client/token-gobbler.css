@@ -36,7 +36,17 @@
 /* ── tables ────────────────────────────────────────────────────────────── */
 .tg-table{width:100%;border-collapse:separate;border-spacing:0;font-size:13px}
 .tg-th{text-align:left;font-size:11px;font-weight:600;letter-spacing:0.05em;text-transform:uppercase;color:#94a3b8;padding:10px 12px;border-bottom:1px solid rgba(255,255,255,0.12);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
-.tg-sticky .tg-th{position:sticky;top:0;z-index:2;background:#0d1524}
+/* Sticky headers are SCOPED to the table's own scroll container. `position:sticky`
+   resolves against the nearest scrolling ancestor, so an unbounded one (a plain
+   `overflow:visible` wrapper) made the header stick to the MODAL BODY — floating
+   over every drawer's content as it scrolled past. Any scroll container that can
+   hold a sticky table is therefore vertical (see .tg-vscroll / .tg-field-scroll),
+   and the offset matches its top padding. */
+.tg-tscroll>.tg-sticky .tg-th,
+.tg-vscroll>.tg-sticky .tg-th,
+.tg-scrollable>.tg-sticky .tg-th,
+.tg-field-scroll>.tg-sticky .tg-th{position:sticky;top:0;z-index:2;background:#0d1524}
+.tg-sticky .tg-th{background:#0d1524}
 .tg-th-r{text-align:right}
 .tg-td{padding:11px 12px;border-bottom:1px solid rgba(255,255,255,0.05);color:#e5e7eb;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
 .tg-td-r{text-align:right}
@@ -55,7 +65,22 @@
 .tg-scroll::-webkit-scrollbar{height:8px}
 .tg-scroll::-webkit-scrollbar-thumb{background:rgba(255,255,255,0.12);border-radius:4px}
 .tg-scroll::-webkit-scrollbar-track{background:transparent}
+/* Height-UNBOUNDED by default: a table sits inline in the modal flow (the whole
+   body scrolls), which is what the long per-session lists want. Only when the
+   container must pin a sticky header is it made vertical (.tg-vscroll, applied by
+   TgTable while no drawer row is open) — an unbound container is what let a
+   sticky header escape and hover over the drawers. */
 .tg-tscroll{overflow:visible}
+.tg-vscroll{max-height:min(62vh,760px);overflow-y:auto;overflow-x:auto;overscroll-behavior:contain}
+.tg-vscroll::-webkit-scrollbar{width:8px;height:8px}
+.tg-vscroll::-webkit-scrollbar-thumb{background:rgba(255,255,255,0.12);border-radius:4px}
+.tg-vscroll::-webkit-scrollbar-track{background:transparent}
+/* A bounded field inside a scrollable drawer: a tall-but-capped window with its
+   own sticky header (used by the per-turn step table). */
+.tg-field-scroll{max-height:min(70vh,900px);overflow-y:auto;overflow-x:auto;overscroll-behavior:contain;border-radius:8px}
+.tg-field-scroll::-webkit-scrollbar{width:8px}
+.tg-field-scroll::-webkit-scrollbar-thumb{background:rgba(255,255,255,0.12);border-radius:4px}
+.tg-field-scroll::-webkit-scrollbar-track{background:transparent}
 
 /* ── buttons ───────────────────────────────────────────────────────────── */
 .tg-refresh{display:inline-flex;align-items:center;gap:7px;font-size:12px;font-weight:700;padding:7px 14px;border-radius:9px;cursor:pointer;border:1px solid rgba(251,191,36,0.4);background:rgba(251,191,36,0.12);color:#fde68a;transition:background .15s ease,transform .1s ease,border-color .15s ease;white-space:nowrap}
@@ -150,7 +175,9 @@
 .tg-scrollable::-webkit-scrollbar{width:7px}
 .tg-scrollable::-webkit-scrollbar-thumb{background:rgba(255,255,255,0.10);border-radius:4px}
 .tg-scrollable::-webkit-scrollbar-track{background:transparent}
-.tg-group td{padding:8px 12px 4px;font-size:11px;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;color:#64748b;border-bottom:1px solid rgba(255,255,255,0.08);background:rgba(255,255,255,0.02);position:sticky;top:0}
+.tg-group td{padding:8px 12px 4px;font-size:11px;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;color:#64748b;border-bottom:1px solid rgba(255,255,255,0.08);background:#0d1524}
+/* Group headers pin under the column header, in the same bounded containers. */
+.tg-tscroll>.tg-sticky .tg-group td,.tg-vscroll>.tg-sticky .tg-group td,.tg-scrollable>.tg-sticky .tg-group td,.tg-field-scroll>.tg-sticky .tg-group td{position:sticky;z-index:1;background:#0d1524}
 /* meta cards stretch to fill the drawer width (auto-fit collapses empty tracks) */
 .tg-meta-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px}
 .tg-meta{background:rgba(255,255,255,0.035);border:1px solid rgba(255,255,255,0.07);border-radius:10px;padding:10px 13px;min-width:0}

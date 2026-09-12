@@ -63,6 +63,7 @@ export const EVENT_META = [
   { key: "toolSubCalls", label: "Tool runs", color: "#c084fc" },
   { key: "userMessages", label: "Your messages", color: "#34d399" },
   { key: "assistantMessages", label: "Assistant msgs", color: "#2dd4bf" },
+  { key: "systemMessages", label: "System msgs", color: "#94a3b8" },
   { key: "turns", label: "Turns", color: "#fbbf24" },
   { key: "userStops", label: "User stops", color: "#f87171" },
   { key: "compactions", label: "Compactions", color: "#f472b6" },
@@ -86,9 +87,9 @@ export type TgCache = { v: 1; home: string; fp: string; at: number; usage: any; 
 // report math) — the fingerprint only covers trajectory growth, so a changed
 // computation would otherwise keep serving stale cached points. The ♻ Reprocess
 // button also clears the cache explicitly.
-const CACHE_VERSION = 4; // v4: sessions now carry p2p / p2pMentions (Runs tab) — a cached breakdown has neither
+const CACHE_VERSION = 6; // v6: sessions now carry `turnTimeline` (per-turn prompts/outcomes + the session event timeline) — v5 cached breakdowns have no such field
 const CACHE_KEY = "tg:cache:v" + CACHE_VERSION;
-const PREV_KEYS = ["tg:cache:v1", "tg:cache:v2", "tg:cache:v3"]; // superseded cache keys — removed so they stop eating quota
+const PREV_KEYS = ["tg:cache:v1", "tg:cache:v2", "tg:cache:v3", "tg:cache:v4", "tg:cache:v5"]; // superseded cache keys — removed so they stop eating quota
 const b64FromBytes = (bytes: Uint8Array): string => {
   let bin = "";
   for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, Array.from(bytes.subarray(i, i + 0x8000)));
@@ -210,7 +211,9 @@ export const toolTable = (tools: any[], sticky: boolean): any => {
       ],
     }, t.name)),
   ]});
-  return sticky ? jsx("div", { className: "tg-tscroll", children: table }) : table;
+  // Bounded so the sticky header pins inside THIS table and can never float over
+  // the drawer content below it (see the sticky rules in token-gobbler.css).
+  return sticky ? jsx("div", { className: "tg-tscroll tg-vscroll", children: table }) : table;
 };
 
 export const numOrEmpty = (v: unknown): string | number => {

@@ -1,6 +1,6 @@
 {
   "name": "token-gobbler",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "private": true,
   "description": "DSH plugin that gobbles your token usage straight out of session trajectories + projections, then prices it against Copilot's Claude/Grok (and your free local models). Watch the corp tokens get chomped.",
   "license": "MIT",
@@ -52,6 +52,7 @@
     "report:days": "node scripts/day-compare.js",
     "report:p2p": "node scripts/p2p-report.js",
     "report:snapshot": "node scripts/corpus-snapshot.js",
+    "report:shape": "node scripts/trajectory-shape.js",
     "build": "npm run build:lib && npm run build:client",
     "build:lib": "tsc -p tsconfig.build.json",
     "build:client": "esbuild client/index.ts --bundle --format=iife --target=es2022 --platform=browser --external:react --external:react/jsx-runtime --loader:.css=text --outfile=lib/client.js",
@@ -61,6 +62,7 @@
     "deploy": "npm run build && cp lib/*.js ~/.dsh/profiles/web/node_modules/token-gobbler/lib/"
   },
   "devDependencies": {
+    "@changesets/cli": "^3.0.2",
     "@types/node": "^26.4.1",
     "esbuild": "^0.28.2",
     "typescript": "^7.0.2"
