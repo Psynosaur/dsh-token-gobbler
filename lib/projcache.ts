@@ -74,6 +74,10 @@ export interface SessionMeta {
 /** A report row for one projcache session. */
 export interface ProjSession {
   id: string;
+  /** The home this session was read from: "local", or an imported source id.
+   *  Session ids are treated as globally unique, so the id alone stays the key
+   *  everywhere; this field is what the dashboard marks the row with. */
+  source: string;
   cwd: string | null;
   createdAt: number | null;
   title: string | null;
@@ -95,7 +99,7 @@ export interface ProjcacheResult {
 }
 
 /** Extract one session record ({identity, rows}) into a report row + rich metadata. */
-function extractSession(id: string, entry: ProjEntry): ProjSession {
+function extractSession(id: string, entry: ProjEntry, source = "local"): ProjSession {
   const identity = entry?.identity || ({} as ProjIdentity);
   const rows = entry?.rows || ({} as Record<string, RowVal>);
   const tu = rows.tokenUsage?.val as TokenUsageVal | undefined;
@@ -147,6 +151,7 @@ function extractSession(id: string, entry: ProjEntry): ProjSession {
   };
   return {
     id,
+    source,
     cwd: identity.cwd || null,
     createdAt: identity.createdAt || null,
     title: (rows.title?.val as string | null | undefined) || null,
@@ -181,7 +186,7 @@ function readDirStore(storePath: string): Record<string, ProjEntry> {
 
 /** Read + aggregate the projection store. Accepts either the new directory store or the
  *  old single-file store. Never throws on a missing/empty store. */
-export function readProjcache(storePath: string): ProjcacheResult {
+export function readProjcache(storePath: string, source = "local"): ProjcacheResult {
   let entries: Record<string, ProjEntry> = {};
   try {
     if (statSync(storePath).isDirectory()) {
@@ -191,7 +196,7 @@ export function readProjcache(storePath: string): ProjcacheResult {
       entries = store?.tables?.sessions || {};
     }
   } catch { return { sessions: [], totals: emptyBuckets(), count: 0, nonZero: 0, error: "unreadable" }; }
-  return aggregateEntries(entries);
+  return aggregateEntries(entries, source);
 }
 
 /** Store paths that may each hold a different SUBSET of the sessions. */
@@ -212,7 +217,7 @@ export interface ProjStorePaths {
  * store silently drops the other era's sessions — which is how "today's new
  * entries" vanish from the dashboard.
  */
-export function readProjcacheMerged(paths: ProjStorePaths): ProjcacheResult & { from: string[] } {
+export function readProjcacheMerged(paths: ProjStorePaths, source = "local"): ProjcacheResult & { from: string[] } {
   const merged: Record<string, ProjEntry> = {};
   const from: string[] = [];
   for (const p of [paths.primary, paths.secondary]) {
@@ -231,16 +236,16 @@ export function readProjcacheMerged(paths: ProjStorePaths): ProjcacheResult & { 
     }
     if (added) from.push(p);
   }
-  return { ...aggregateEntries(merged), from };
+  return { ...aggregateEntries(merged, source), from };
 }
 
 /** Aggregate raw store entries into report rows (shared by both readers). */
-function aggregateEntries(entries: Record<string, ProjEntry>): ProjcacheResult {
+function aggregateEntries(entries: Record<string, ProjEntry>, source = "local"): ProjcacheResult {
   const sessions: ProjSession[] = [];
   const totals = emptyBuckets();
   let nonZero = 0;
   for (const [id, entry] of Object.entries(entries)) {
-    const s = extractSession(id, entry);
+    const s = extractSession(id, entry, source);
     if (s.allTokens > 0) nonZero++;
     if (s.buckets) for (const k of ["uncachedInputTokens", "outputTokens", "cacheReadTokens", "cacheWriteTokens"] as const) totals[k] += s.buckets[k];
     sessions.push(s);

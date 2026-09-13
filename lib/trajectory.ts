@@ -1306,6 +1306,7 @@ export function loadDiskCache(dshHome: string): { loaded: number } {
 
   let count = 0;
   for (const [filePath, entry] of Object.entries(data.entries || {})) {
+    if (isDropped(filePath)) continue; // an import that was removed/resynced since the cache was written
     if (entry && typeof entry.mtimeMs === "number" && typeof entry.size === "number" && entry.parsed) {
       parseCache.set(filePath, entry);
       count++;
@@ -1326,6 +1327,7 @@ export function saveDiskCache(dshHome: string): { saved: number } {
   const entries: Record<string, ParseCacheEntry> = {};
   let count = 0;
   for (const [filePath, entry] of parseCache) {
+    if (isDropped(filePath)) { parseCache.delete(filePath); continue; } // an import that was removed/resynced
     // Prune: skip entries whose file no longer exists
     try { statSync(filePath); } catch { continue; }
     entries[filePath] = entry;
@@ -1341,10 +1343,40 @@ export function saveDiskCache(dshHome: string): { saved: number } {
   return { saved: count };
 }
 
+/**
+ * Prefixes whose cached parses were dropped. Kept so the DROP survives the disk
+ * cache too: a removed import must not come back from trajectory-cache.json on
+ * the next load, and a resynced one must really be re-read.
+ */
+const droppedPrefixes = new Set<string>();
+const isDropped = (filePath: string): boolean => {
+  for (const prefix of droppedPrefixes) if (filePath.startsWith(prefix)) return true;
+  return false;
+};
+
+/**
+ * Drop the cached parses of every trajectory under `prefix` so the next read
+ * re-reads and re-parses those files — in memory AND in the persisted cache.
+ * Used by an imported source's RESYNC (re-read only that home; the rest of the
+ * dashboard keeps its warm cache) and by REMOVE (forget the files entirely).
+ * Returns how many in-memory entries were dropped.
+ */
+export function invalidateTrajectoryCache(prefix: string): number {
+  if (!prefix) return 0;
+  const root = prefix.endsWith("/") ? prefix : prefix + "/";
+  droppedPrefixes.add(root);
+  let dropped = 0;
+  for (const key of [...parseCache.keys()]) {
+    if (key === prefix || key.startsWith(root)) { parseCache.delete(key); dropped++; }
+  }
+  return dropped;
+}
+
 /** Invalidate the disk cache (e.g. after a parse-format change). */
 export function clearDiskCache(dshHome?: string): void {
   _diskCacheLoaded = false;
   _diskCachePath = null;
+  droppedPrefixes.clear();
   parseCache.clear();
   parseStats.cacheHits = 0;
   parseStats.recomputed = 0;

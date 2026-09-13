@@ -1,6 +1,7 @@
 // token-gobbler · client/hooks.ts
 // Shared data fetch hook + the settings→modal open-ref.
 import { request, readCache, writeCache, clearCache, type TgCache } from "./core";
+import { setSourceIndex } from "./sources";
 
 // shared open-ref (settings dashboard -> modal)
 export const activityRef: { open: ((tab?: string) => void) | null } = { open: null };
@@ -14,6 +15,7 @@ export const activityRef: { open: ((tab?: string) => void) | null } = { open: nu
 const usageFingerprint = (u: any): string => {
   if (!u) return "";
   const t = (u.sources && u.sources.trajectories) || {};
+  const src = ((u.sources && u.sources.imported) || []) as any[];
   return JSON.stringify({
     tok: (u.totals && u.totals.allTokens) || 0,
     files: t.files || 0,
@@ -23,6 +25,9 @@ const usageFingerprint = (u: any): string => {
     n: Array.isArray(u.sessions) ? u.sessions.length : 0,
     comp: u.compactionSig || "",
     stops: (u.events && u.events.userStops) || 0,
+    // Imported homes are part of the payload: adding, removing, pausing or
+    // resyncing one changes the fingerprint, so the cached points are refetched.
+    src: src.map((s) => s.id + ":" + (s.enabled === false ? 0 : 1) + ":" + (s.lastSyncAt || 0) + ":" + ((s.live && s.live.sessions) || 0) + ":" + (s.error ? 1 : 0)).join(","),
   });
 };
 
@@ -51,6 +56,7 @@ export function useGobblerData() {
       try { cached = await readCache(); } catch { cached = null; }
       if (cached && cached.usage) {
         sawData = true;
+        setSourceIndex(cached.usage.sources); // badges render from the very first paint
         setData(cached.usage);
         setBreakdown(cached.breakdown ?? null);
         setPerf(cached.perf ?? null);
@@ -60,6 +66,7 @@ export function useGobblerData() {
       // 2) Cheap probe: /usage (aggregates only) — the source of the fingerprint.
       const u = await request("/usage");
       sawData = true;
+      setSourceIndex(u.sources);
       setData(u);
       const homeOk = !cached || !cached.home || cached.home === u.dshHome;
       const fp = usageFingerprint(u);

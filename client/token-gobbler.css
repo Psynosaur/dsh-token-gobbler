@@ -48,6 +48,10 @@
 .tg-field-scroll>.tg-sticky .tg-th{position:sticky;top:0;z-index:2;background:#0d1524}
 .tg-sticky .tg-th{background:#0d1524}
 .tg-th-r{text-align:right}
+/* Sortable table headers */
+.tg-sortable{cursor:pointer;user-select:none;transition:color .15s ease}
+.tg-sortable:hover{color:#e5e7eb}
+.tg-sorted{color:#fbbf24}
 .tg-td{padding:11px 12px;border-bottom:1px solid rgba(255,255,255,0.05);color:#e5e7eb;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
 .tg-td-r{text-align:right}
 .tg-tr{transition:background .12s ease}
@@ -204,8 +208,9 @@
 .tg-rate-field input{width:100%;min-width:0}
 
 /* ── perf bar chart (reusable metricBars) ──────────────────────────────── */
-/* (metricBars was replaced by amCharts — see client/amchart.tsx. These legacy
-   classes are kept only as a fallback and for the simple tool-share bar.) */
+/* (The hand-rolled metricBars were replaced by the canvas graph engine — see
+   client/graph.ts. These legacy classes are kept only for the simple
+   tool-share bar in the session drawer.) */
 /* .tg-chart is width:100% + min/max-width:0 so a chart with hundreds of bars
    never expands its parent (the drawer <td> / modal) — the bars scroll inside
    .tg-barchart instead. Legend is a bullet list outside the chart. */
@@ -228,21 +233,11 @@
 .tg-legend-i{display:flex;align-items:center;gap:6px}
 .tg-legend-dot{width:10px;height:10px;border-radius:2px;display:inline-block;flex:none}
 
-/* ── amCharts column chart (reusable AmBarChart) ───────────────────────── */
-/* amCharts renders an SVG sized to its container; the container is width:100%
-   and min-width:0, so a chart with hundreds of categories stays inside the
-   drawer <td> / modal instead of pushing it wide. */
-.tg-amchart{width:100%;min-width:0;max-width:100%;position:relative;border-radius:10px;overflow:hidden}
-.tg-amchart-err{display:flex;align-items:center;justify-content:center;color:#f87171;font-size:12.5px;padding:12px}
-/* wrapper so the turn chips sit above the chart without widening it */
-.tg-amchart-wrap{width:100%;min-width:0;max-width:100%;display:flex;flex-direction:column;gap:8px}
-/* turn chips — one per turn; click to zoom the chart to that turn */
-.tg-turn-chips{display:flex;flex-wrap:wrap;gap:6px}
-.tg-turn-chip{font-size:11px;font-weight:600;padding:3px 9px;border-radius:999px;border:1px solid rgba(255,255,255,0.12);background:rgba(255,255,255,0.04);color:#94a3b8;cursor:pointer;white-space:nowrap;transition:background .12s ease,color .12s ease,border-color .12s ease}
-.tg-turn-chip:hover{background:rgba(255,255,255,0.1);color:#e5e7eb}
-.tg-turn-chip.active{background:rgba(251,191,36,0.16);color:#fde68a;border-color:rgba(251,191,36,0.4)}
 /* legend chips — one per series group (context window); click to hide/show it.
-   Swatch = the window's paired lines: solid (decode) over dotted (prefill). */
+   Swatch = the window's paired lines: solid (decode) over dotted (prefill).
+   The row is a wrapping flex line so the chips keep a gap (they are rendered as
+   an array of buttons with no whitespace between them). */
+.tg-legend-chips{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
 .tg-legend-chip{display:inline-flex;align-items:center;gap:7px;font-size:11px;font-weight:600;padding:3px 10px;border-radius:999px;border:1px solid rgba(255,255,255,0.12);background:rgba(255,255,255,0.04);color:#cbd5e1;cursor:pointer;white-space:nowrap;transition:background .12s ease,opacity .12s ease}
 .tg-legend-chip:hover{background:rgba(255,255,255,0.1)}
 .tg-legend-chip .sw{display:inline-flex;flex-direction:column;gap:3px;width:16px;flex:none}
@@ -252,16 +247,65 @@
 .tg-legend-chip.off{opacity:0.38}
 .tg-legend-chip.static{cursor:default}
 .tg-legend-chip.static:hover{background:rgba(255,255,255,0.04)}
-.tg-xmin-row{display:flex;align-items:center;gap:8px;justify-content:flex-end;margin:0 0 4px}
-.tg-xmin{width:110px;font-size:11px;padding:2px 6px;border-radius:6px;border:1px solid rgba(255,255,255,0.14);background:rgba(255,255,255,0.05);color:#e2e8f0;outline:none}
-.tg-xmin:focus{border-color:rgba(96,165,250,0.6)}
-.tg-xmin-clear{font-size:13px;line-height:1;padding:1px 5px;border:0;border-radius:6px;background:rgba(255,255,255,0.08);color:#94a3b8;cursor:pointer}
-.tg-xmin-clear:hover{background:rgba(255,255,255,0.16);color:#e2e8f0}
+
+/* ── canvas graph engine (client/graph.ts + client/graph-canvas.tsx) ─────
+   Every chart in the plugin is drawn here: one
+   <canvas> per panel, sized to its container (min-width:0 so a wide chart can
+   never push the drawer <td> / modal wide) and repainted at device-pixel
+   resolution by the React shell in client/graph-canvas.tsx. */
+.tg-graph{width:100%;min-width:0;max-width:100%;display:flex;flex-direction:column;gap:8px}
+.tg-graph-plot{position:relative;width:100%;min-width:0;max-width:100%}
+.tg-graph-canvas{display:block;width:100%;border-radius:10px;cursor:crosshair}
+/* plot-mode switch — Lines / Both / Dots (a scatter), a segmented control that
+   sits above the plot; the choice is part of the chart's persisted state. */
+.tg-graph-modes{display:inline-flex;align-self:flex-end;gap:2px;padding:2px;border-radius:999px;border:1px solid rgba(255,255,255,0.12);background:rgba(255,255,255,0.03)}
+.tg-graph-mode{font-size:10.5px;font-weight:600;padding:2px 10px;border:0;border-radius:999px;background:transparent;color:#94a3b8;cursor:pointer;white-space:nowrap;transition:background .12s ease,color .12s ease}
+.tg-graph-mode:hover{background:rgba(255,255,255,0.08);color:#e2e8f0}
+.tg-graph-mode.on{background:rgba(96,165,250,0.22);color:#dbeafe}
+
+/* hover tooltip rows (the shared multi-series box) */
+.tg-cv-tip-row{display:flex;align-items:center;gap:7px;margin-top:3px;font-size:11px}
+.tg-cv-tip-row i.dot{display:inline-block;width:7px;height:7px;border-radius:50%;flex:none}
+.tg-cv-tip-row .k{color:#94a3b8;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tg-cv-tip-row .v{color:#f1f5f9;font-weight:600;font-variant-numeric:tabular-nums}
 
 /* ── collapse (reusable) ───────────────────────────────────────────────── */
 .tg-collapse{display:flex;flex-direction:column;gap:8px}
 .tg-collapse-head{display:inline-flex;align-items:center;gap:7px;font-size:12px;font-weight:600;color:#cbd5e1;padding:6px 11px;border-radius:8px;border:1px solid rgba(255,255,255,0.1);background:rgba(255,255,255,0.03);cursor:pointer;width:fit-content;transition:background .12s ease,border-color .12s ease}
 .tg-collapse-head:hover{background:rgba(255,255,255,0.07);border-color:rgba(255,255,255,0.18)}
+
+/* ── settings section + chart defaults card (client/chart-settings.tsx) ─── */
+.tg-set-card{padding:14px 16px;display:flex;flex-direction:column;gap:11px}
+/* Label | control on the first line, the hint on its OWN line underneath. The
+   hint used to be the grid's third column, which the DSH settings pane (a
+   narrow column on a wide viewport — the media query below never fires there)
+   squeezed into a ~100px ribbon of text, or pushed clean out of the card by an
+   over-wide control. Two columns + a full-width hint cannot do either. */
+.tg-set-row{display:grid;grid-template-columns:minmax(110px,168px) minmax(0,1fr);gap:6px 12px;align-items:center}
+.tg-set-label{font-size:12px;font-weight:600;color:#cbd5e1}
+.tg-set-ctl{display:flex;align-items:center;min-width:0;flex-wrap:wrap}
+.tg-set-hint{grid-column:1 / -1;font-size:11px;color:#64748b;line-height:1.5;max-width:78ch;overflow-wrap:anywhere}
+/* One collapsible drawer per settings group: the numbers that matter stay on the
+   HEAD (visible while the drawer is closed), the cards unfold underneath. */
+.tg-set-drawers{display:flex;flex-direction:column;gap:10px}
+.tg-set-drawers .tg-collapse{gap:0}
+.tg-set-drawers .tg-collapse-head{width:100%;padding:10px 13px}
+.tg-set-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap;flex:1;min-width:0}
+.tg-set-head-t{font-size:12.5px;font-weight:700;color:#e2e8f0}
+.tg-set-chip{display:inline-flex;align-items:baseline;gap:5px;background:rgba(148,163,184,0.10);border-radius:6px;padding:2px 8px;font-size:11px;white-space:nowrap}
+.tg-set-head .tg-set-chip:first-of-type{margin-left:auto}
+.tg-set-chip-l{color:#94a3b8}
+.tg-set-chip-v{color:#e5e7eb;font-weight:700}
+.tg-set-body{display:flex;flex-direction:column;gap:14px;padding:2px 2px 4px}
+.tg-set-inline{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.tg-set-unit{font-size:11px;color:#64748b}
+.tg-set-toggle{font-size:11px;padding:4px 10px;border-radius:8px}
+.tg-set-foot{display:flex;align-items:center;gap:12px;margin-top:2px;border-top:1px solid rgba(255,255,255,0.07);padding-top:11px}
+.tg-range{width:120px;height:4px;-webkit-appearance:none;appearance:none;background:rgba(255,255,255,0.14);border-radius:3px;outline:none}
+.tg-range::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;width:12px;height:12px;border-radius:50%;background:#fbbf24;cursor:pointer}
+.tg-range::-moz-range-thumb{width:12px;height:12px;border:0;border-radius:50%;background:#fbbf24;cursor:pointer}
+.tg-range:disabled{opacity:0.4}
+@media (max-width: 900px){.tg-set-row{grid-template-columns:1fr;gap:6px}}
 
 /* ── misc ──────────────────────────────────────────────────────────────── */
 /* delete button — same height & radius as the corp/local <select> (.tg-input) so they
@@ -319,3 +363,56 @@
 .tg-comp-summary::-webkit-scrollbar{width:7px}
 .tg-comp-summary::-webkit-scrollbar-thumb{background:rgba(255,255,255,0.10);border-radius:4px}
 .tg-comp-summary::-webkit-scrollbar-track{background:transparent}
+
+/* ── imported sources (other machines / other OSes) ─────────────────────────
+   The badge MARKS a session that came from an imported DSH home; the chips
+   filter the tables by home; .tg-src-* styles the management card in Settings. */
+.tg-src-badge{display:inline-flex;align-items:center;gap:4px;font-size:10px;font-weight:700;line-height:1;padding:3px 7px;margin-right:6px;border-radius:999px;background:rgba(56,189,248,0.14);border:1px solid rgba(56,189,248,0.4);color:#7dd3fc;vertical-align:middle;white-space:nowrap;max-width:150px;overflow:hidden;text-overflow:ellipsis}
+.tg-src-badge .tg-src-ico{font-size:11px;filter:saturate(1.1)}
+.tg-sess-title{display:inline-flex;align-items:center;min-width:0}
+/* An imported row gets a dim left rail so a column of mixed homes reads at a
+   glance — without the archived dimming (tg-archived) that means something else. */
+.tg-tr.tg-imported>.tg-td:first-child{box-shadow:inset 3px 0 0 rgba(56,189,248,0.35)}
+.tg-importline{display:flex;align-items:flex-start;gap:8px;font-size:12px;color:#7dd3fc;background:rgba(56,189,248,0.09);border:1px solid rgba(56,189,248,0.28);border-radius:10px;padding:9px 12px;line-height:1.5}
+.tg-importline-ico{font-size:13px;line-height:1.2}
+/* the source filter chips */
+.tg-srcbar{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.tg-srcchip{display:inline-flex;align-items:center;gap:6px;font-size:11.5px;font-weight:600;padding:5px 10px;border-radius:999px;cursor:pointer;border:1px solid rgba(255,255,255,0.12);background:rgba(255,255,255,0.04);color:#cbd5e1;transition:background .15s ease,border-color .15s ease,color .15s ease}
+.tg-srcchip:hover{background:rgba(255,255,255,0.08);border-color:rgba(255,255,255,0.22)}
+.tg-srcchip.active{background:rgba(56,189,248,0.16);border-color:rgba(56,189,248,0.45);color:#bae6fd}
+.tg-srcchip-n{font-size:10.5px;color:#94a3b8;background:rgba(255,255,255,0.06);border-radius:999px;padding:1px 6px}
+.tg-srcchip.active .tg-srcchip-n{color:#e0f2fe;background:rgba(56,189,248,0.22)}
+/* the management card */
+.tg-src-add .tg-set-ctl{gap:8px;flex-wrap:wrap}
+.tg-src-path{min-width:280px;flex:1}
+.tg-src-name{width:170px}
+.tg-src-actions{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.tg-src-list,.tg-src-cands{display:flex;flex-direction:column;gap:7px;border-top:1px solid rgba(255,255,255,0.07);padding-top:11px}
+.tg-src-list-head,.tg-src-cands-head{font-size:11px;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;color:#94a3b8}
+.tg-src-row{display:grid;grid-template-columns:26px 1fr auto;gap:10px;align-items:center;padding:9px 11px;border-radius:10px;background:rgba(255,255,255,0.035);border:1px solid rgba(255,255,255,0.08)}
+.tg-src-row-bad{border-color:rgba(248,113,113,0.4);background:rgba(248,113,113,0.07)}
+.tg-src-row-off{opacity:0.62}
+.tg-src-row-ico{font-size:17px;text-align:center}
+.tg-src-row-main{min-width:0;display:flex;flex-direction:column;gap:2px}
+.tg-src-row-top{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.tg-src-row-label{font-size:13px;font-weight:700;color:#e5e7eb}
+.tg-src-row-os{font-size:10px;font-weight:600;color:#94a3b8;background:rgba(255,255,255,0.06);border-radius:999px;padding:2px 7px}
+.tg-src-row-off-pill{font-size:10px;font-weight:700;color:#94a3b8;background:rgba(148,163,184,0.16);border-radius:999px;padding:2px 7px}
+.tg-src-row-err{font-size:11px;font-weight:600;color:#fca5a5}
+.tg-src-row-path{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11px;color:#94a3b8;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;direction:rtl;text-align:left}
+.tg-src-row-stats{font-size:11px;color:#64748b}
+.tg-src-row-actions{display:flex;align-items:center;gap:6px;flex-wrap:wrap;justify-content:flex-end}
+.tg-src-btn{font-size:11px;padding:5px 9px}
+.tg-src-danger{color:#fca5a5;border-color:rgba(248,113,113,0.45)}
+.tg-src-danger:hover{background:rgba(248,113,113,0.12)}
+.tg-src-confirm{display:inline-flex;align-items:center;gap:6px}
+.tg-src-msg{font-size:12px;border-radius:9px;padding:8px 11px;line-height:1.45}
+.tg-src-msg.ok{color:#6ee7b7;background:rgba(16,185,129,0.1);border:1px solid rgba(16,185,129,0.3)}
+.tg-src-msg.warn{color:#fcd34d;background:rgba(251,191,36,0.1);border:1px solid rgba(251,191,36,0.3)}
+.tg-src-msg.err{color:#fca5a5;background:rgba(248,113,113,0.1);border:1px solid rgba(248,113,113,0.35)}
+.tg-src-cand{display:grid;grid-template-columns:26px 1fr auto;gap:10px;align-items:center;padding:7px 10px;border-radius:9px;background:rgba(255,255,255,0.025);border:1px dashed rgba(255,255,255,0.12)}
+.tg-src-cand-main{min-width:0}
+.tg-src-cand-path{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11.5px;color:#cbd5e1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tg-src-cand-stats{font-size:10.5px;color:#64748b}
+.tg-src-cand-known{font-size:11px;color:#64748b;font-style:italic}
+.tg-seg-sm .tg-seg-btn{font-size:11px;padding:4px 10px}

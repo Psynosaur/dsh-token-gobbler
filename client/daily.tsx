@@ -7,7 +7,7 @@
 // All aggregation math lives in client/agg.ts.
 import { fmt, fmtC, money, fmtMs, badgeGrid } from "./core";
 import { aggregateSessions, dayStr, rangeStartFor } from "./agg";
-import { SessionTable } from "./session-table";
+import { SessionTable, sessionPrefill, sessionRuntime } from "./session-table";
 import { DailyHeatmap, rangeLabel } from "./daily-heatmap";
 import { combinedDrawer } from "./drawers";
 import { costCard } from "./panels";
@@ -17,6 +17,23 @@ export const DailyTab = ({ bySession, initialDay }: { bySession: any[]; initialD
   const [selDay, setSelDayRaw] = React.useState<string | null>(initialDay || null);
   const [expanded, setExpanded] = React.useState<string | null>(null);
   const [page, setPage] = React.useState(0);
+  // Sort state for the daily tab session table (persisted to localStorage)
+  const [sortState, setSortState] = React.useState<any>(() => {
+    try {
+      const s = localStorage.getItem("tg:sort:daily-sessions");
+      return s ? JSON.parse(s) : null;
+    } catch {
+      return null;
+    }
+  });
+  const handleSort = React.useCallback((col: any) => {
+    setSortState(col);
+    try {
+      localStorage.setItem("tg:sort:daily-sessions", JSON.stringify(col));
+    } catch {
+      // ignore quota errors
+    }
+  }, []);
   const overRef = React.useRef<any>(null);
 
   // Sessions grouped by local calendar day (skip un-dateable rows).
@@ -56,9 +73,26 @@ export const DailyTab = ({ bySession, initialDay }: { bySession: any[]; initialD
   // projection/rollup data. Those sessions are already included in the totals;
   // filtering them here made today's table show only the few sessions with a
   // parsed per-step trajectory (while the token totals continued to grow).
+  // Also attach numeric prefill/runtime values for sorting (the render functions
+  // compute display strings, but sorting needs numeric values).
   const selRows = React.useMemo(() => {
     const rows = bySession || [];
-    return selDay ? rows.filter((s) => s.date === selDay) : rows;
+    const filtered = selDay ? rows.filter((s) => s.date === selDay) : rows;
+    // Pre-compute numeric sort values for prefill and runtime columns
+    return filtered.map((s) => {
+      // Compute prefill speed (numeric) for sorting
+      let preTok = 0, preMs = 0;
+      for (const st of (s.steps || [])) {
+        if (st.ttftMs > 0) { preTok += (st.in || 0); preMs += st.ttftMs; }
+      }
+      const prefillPerSec = preMs > 0 ? preTok / (preMs / 1000) : null;
+      // Compute runtime (numeric ms) for sorting
+      let rtMs = 0;
+      for (const st of (s.steps || [])) {
+        rtMs += (st.ttftMs || 0) + (st.decodeMs || 0);
+      }
+      return { ...s, prefillPerSec, runtime: rtMs };
+    });
   }, [bySession, selDay]);
 
   return jsxs("div", { className: "tg-day", children: [
@@ -97,6 +131,7 @@ export const DailyTab = ({ bySession, initialDay }: { bySession: any[]; initialD
           expandedId: expanded, onToggle: setExpanded,
           drawer: (s: any) => combinedDrawer(s, { defaultClosed: true }),
           page, setPage, pageSize: 25,
+          sort: sortState, onSort: handleSort, sortKey: "daily-sessions",
           columns: { lastActive: true, tin: true, tout: true, tcache: true },
           empty: jsx("div", { className: "tg-muted", style: { fontSize: 13, padding: "12px 4px" }, children: "No combined per-step data" + (selDay ? " for " + selDay : " yet") + " — sessions with per-turn usage appear here." }),
         }),

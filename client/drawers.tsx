@@ -4,8 +4,9 @@
 // step table).
 import { fmt, fmtC, fmtMs, thL, thR, tdL, tdR, eventChips, toolTable, request } from "./core";
 import { sessionTokens } from "./agg";
-import { AmBarChart, type AmSeries } from "./amchart";
+import { GraphCanvas } from "./graph-canvas";
 import { Markdown } from "./markdown";
+import { isImported, sourceInfo, osIcon, osName } from "./sources";
 
 // ── turn timeline (prompts, outcomes, all non-step events) ──────────────────
 // How a turn ended, from the trajectory's turn/end record. `color` drives the
@@ -160,35 +161,13 @@ export const Collapse = ({ label, children, defaultOpen, onOpenChange }: { label
   ]});
 };
 
-// ── Reusable token-spend series + chart ──────────────────────────────────
-// The four token buckets in a fixed order + palette, shared by every
-// "at a glance" token chart: the per-step breakdown (stacked area), the
-// per-model spend summary on the Tokens tab, and the other tab summaries we
-// will port later. `kind` / `stacked` / `height` vary per call site.
-export const TOKEN_SERIES: AmSeries[] = [
-  { key: "in", label: "In", color: "#60a5fa", unit: "tok" },
-  { key: "out", label: "Out", color: "#a78bfa", unit: "tok" },
-  { key: "cache", label: "Cache", color: "#2dd4bf", unit: "tok" },
-  { key: "think", label: "Think", color: "#c084fc", unit: "tok" },
-];
-
-export type TokenSpendRow = { label: string; in: number; out: number; cache: number; think: number };
-
-// Reusable: render token spend (in / out / cache / think) for a set of rows
-// as a column chart — one grouped (or stacked) cluster of four bars per row.
-// Drop-in for any tab that wants a token-spend summary across its rows.
-export const TokenSpendChart = ({ rows, height = 240, stacked = false, rotate = false, horizontal = false, hideCategoryLabels = false }: { rows: TokenSpendRow[]; height?: number; stacked?: boolean; rotate?: boolean; horizontal?: boolean; hideCategoryLabels?: boolean }) =>
-  jsx(AmBarChart, {
-    data: rows.map((r) => ({ cat: r.label, in: r.in ?? 0, out: r.out ?? 0, cache: r.cache ?? 0, think: r.think ?? 0 })),
-    categoryField: "cat",
-    kind: "column",
-    stacked,
-    horizontal,
-    hideCategoryLabels,
-    rotateCategories: rotate,
-    series: TOKEN_SERIES,
-    height,
-  });
+/** The origin line of an imported session: "🪟 Sabrent · Ohan (Windows) · /media/…". */
+const sourceMeta = (s: any): string | null => {
+  if (!isImported(s)) return null;
+  const info = sourceInfo(s.source);
+  if (!info) return String(s.source);
+  return osIcon(info.os) + " " + info.label + " (" + osName(info.os) + ") · " + info.path;
+};
 
 const metaGrid = (meta: [string, any][]): any =>
   jsx("div", { className: "tg-meta-grid", children: meta.map(([k, v]) => (v == null || v === "" ? null : jsxs("div", { className: "tg-meta", children: [
@@ -199,6 +178,7 @@ const metaGrid = (meta: [string, any][]): any =>
 export const sessionDrawer = (s: any) => {
   const m = s.meta || {};
   const meta: [string, any][] = [
+    ["Source", sourceMeta(s)],
     ["Project", s.cwd],
     ["Turns", s.turns || null],
     ["LLM time", s.llmMs ? fmtMs(s.llmMs) : null],
@@ -280,92 +260,6 @@ export const sessionDrawer = (s: any) => {
   ]});
 };
 
-// Per-session drawer: bar chart overview (decode + prefill per step) with the
-// detailed step/tool table collapsed below — expand it when you need the numbers.
-export const perfDrawer = (s: any) => {
-  let i = 0;
-  const steps = (s.stepTree || []).flatMap((t: any) => (t.steps || []).map((st: any) => { i += 1; return { ...st, cat: "S" + i, turn: "Turn " + t.turn }; }));
-  return jsxs("div", { className: "tg-drawer-inner", children: [
-    jsx("div", { className: "tg-drawer-sec", children: "Step performance — decode & prefill speed" }),
-    jsx(AmBarChart, {
-      data: steps.map((st: any) => ({ cat: st.cat, turn: st.turn, tool: (st.tools || []).slice(0, 3).join(", "), decode: st.decodeTokPerSec ?? 0, prefill: st.prefillTokPerSec ?? 0 })),
-      categoryField: "cat",
-      groupField: "turn",
-      subField: "tool",
-      kind: "line",
-      smooth: true,
-      series: [
-        { key: "decode", label: "Decode", color: "#38bdf8", unit: "tok/s", axis: 0 },
-        { key: "prefill", label: "Prefill", color: "#2dd4bf", unit: "tok/s", axis: 1 },
-      ],
-      height: 220,
-    }),
-    jsx(Collapse, { label: "Show per-step table (tools + tokens + speeds)", children: jsx("div", { className: "tg-scrollable", children: stepTree(s) }) }),
-  ]});
-};
-
-// Leaf label is replaced by a standard collapsible table: each Turn is a
-// collapsible header row; under it, step rows with real columns.
-const stepCell = (st: any) => jsxs("tr", { className: "tg-tr", children: [
-  tdL("S" + st.step, { style: { fontFamily: "monospace", fontSize: 11 } }),
-  tdL(jsxs("div", { style: { display: "flex", gap: 4, flexWrap: "wrap", alignItems: "center" }, children: [
-    ...(st.tools || []).map((t: string) => jsx("span", { className: "tg-chip", style: { fontSize: 10 }, children: t }, t)),
-    st.parallel ? jsx("span", { className: "tg-chip", style: { fontSize: 10, color: "#fbbf24" }, children: "parallel" }, "parallel") : null,
-  ]}), { title: st.parallel ? "multiple tools called after this step (parallel group)" : "single tool call after this step" }),
-  tdR(fmtC(st.in)),
-  tdR(fmtC(st.out)),
-  tdR(st.cache ? fmtC(st.cache) : "—"),
-  tdR(st.thinking ? (st.thinkingEstimated ? "≈" : "") + fmtC(st.thinking) : "—", { style: { color: st.thinking ? "#c084fc" : undefined }, title: (st.thinkingEstimated ? "≈ estimated from reasoning text (provider reported 0 reasoning tokens)" : "reasoning tokens") }),
-]}, "s" + st.turn + "-" + st.step);
-
-// Collapsible turn table — the standard way to show a turn → step hierarchy:
-// one header row per turn (chevron ▸/▾ + "Turn N · X steps"), then indented step
-// rows. No ASCII tree glyphs.
-const TurnStepTable = ({ steps }: { steps: any[] }) => {
-  const [closed, setClosed] = React.useState<Set<number>>(() => new Set());
-  const toggle = (turn: number) => setClosed((p) => { const n = new Set(p); if (n.has(turn)) n.delete(turn); else n.add(turn); return n; });
-  return jsx("table", { className: "tg-table", style: { fontSize: 12.5 }, children: [
-    jsx("tr", { children: [thL("Step"), thL("Tools"), thR("In"), thR("Out"), thR("Cache"), thR("Think")] }),
-    ...(steps || []).flatMap((turn: any) => {
-      const isClosed = closed.has(turn.turn);
-      // Per-turn column totals — shown on the turn header row, next to the step count.
-      const tIn = turn.steps.reduce((n: number, st: any) => n + (st.in || 0), 0);
-      const tOut = turn.steps.reduce((n: number, st: any) => n + (st.out || 0), 0);
-      const tCache = turn.steps.reduce((n: number, st: any) => n + (st.cache || 0), 0);
-      const tThink = turn.steps.reduce((n: number, st: any) => n + (st.thinking || 0), 0);
-      const header = jsxs("tr", {
-        className: "tg-tr tg-row-btn",
-        style: { background: "rgba(255,255,255,0.03)" },
-        onClick: (e: any) => { if (e && e.stopPropagation) e.stopPropagation(); toggle(turn.turn); },
-        children: [
-          tdL(jsxs("span", { style: { display: "flex", alignItems: "center", gap: 7, fontWeight: 700 }, children: [
-            jsx("span", { className: "tg-chev" + (isClosed ? "" : " open"), children: "▶" }),
-            jsx("span", { children: "Turn " + turn.turn }),
-          ]})),
-          tdL(jsx("span", { className: "tg-faint", style: { fontSize: 11 }, children: turn.steps.length + " step" + (turn.steps.length > 1 ? "s" : "") })),
-          tdR(fmtC(tIn), { style: { fontWeight: 700 } }),
-          tdR(fmtC(tOut), { style: { fontWeight: 700 } }),
-          tdR(fmtC(tCache), { style: { fontWeight: 700 } }),
-          tdR(tThink ? fmtC(tThink) : "—", { style: { fontWeight: 700, color: tThink ? "#c084fc" : undefined } }),
-        ],
-      }, "turn" + turn.turn);
-      if (isClosed) return [header];
-      return [header, ...turn.steps.map(stepCell)];
-    }),
-  ]});
-};
-
-// Estimated fallback (no exact per-turn usage): a simple per-tool payload table.
-const estimatedToolTable = (toolTokens: any[]) => jsx("table", { className: "tg-table", style: { fontSize: 12.5 }, children: [
-  jsx("tr", { children: [thL("Tool"), thR("Calls"), thR("Payload"), thR("Thinking")] }),
-  ...(toolTokens || []).map((t: any) => jsxs("tr", { className: "tg-tr", children: [
-    tdL(t.tool, { style: { fontFamily: "monospace", fontSize: 11 } }),
-    tdR(String(t.calls)),
-    tdR(fmtC(t.total), { style: { fontWeight: 600 } }),
-    tdR(t.reasoning ? fmtC(t.reasoning) : "—", { style: { color: t.reasoning ? "#c084fc" : undefined } }),
-  ]}, t.tool)),
-]});
-
 // One compact stat chip for the "at a glance" strip (colored dot + label + value).
 // auto-fit grids stretch these across the widened modal, so they get a bit more
 // padding + larger values than the plain stat cards.
@@ -377,77 +271,6 @@ const glance = (label: string, value: number, color: string, total = false): any
   jsx("div", { className: "tg-stat-value tg-num", style: { fontSize: total ? 24 : 21, marginTop: 5 }, children: fmtC(value) }),
 ]});
 
-// The token breakdown cards + graph + collapsible table for the Tokens drawer.
-const TokenDrawerBody = ({ s }: { s: any }) => {
-  const hasSteps = !!(s.stepTree && s.stepTree.length);
-  // Session token breakdown: the four buckets (authoritative) + thinking (from
-  // the step tree) + tool-call payloads + the total (shared: client/agg.ts).
-  const tot = sessionTokens(s);
-  const stepRows = (() => {
-    const rows: any[] = [];
-    let i = 0;
-    for (const t of (s.stepTree || [])) for (const st of (t.steps || [])) {
-      i += 1;
-      rows.push({ cat: "S" + i, turn: "Turn " + t.turn, tool: (st.tools || []).slice(0, 3).join(", "), in: st.in ?? 0, out: st.out ?? 0, cache: st.cache ?? 0, think: st.thinking ?? 0 });
-    }
-    return rows;
-  })();
-  return jsxs("div", { children: [
-    jsxs("div", { style: { marginBottom: 14 }, children: [
-      jsx("div", { className: "tg-drawer-sec", children: "Token breakdown — this session" }),
-      jsx("div", { className: "tg-chipgrid", children: [
-        glance("In", tot.tin, "#60a5fa"),
-        glance("Out", tot.tout, "#a78bfa"),
-        glance("Cache", tot.tcache, "#2dd4bf"),
-        glance("Thinking", tot.tthink, "#c084fc"),
-        glance("Tools", tot.ttools, "#34d399"),
-        glance("Total", tot.total, "#fbbf24", true),
-      ]}),
-    ]}),
-    jsx("div", { className: "tg-drawer-sec", children: "Token overview — per step (in / out / cache / think)" }),
-    hasSteps
-      ? jsx(AmBarChart, {
-          data: stepRows,
-          categoryField: "cat",
-          groupField: "turn",
-          subField: "tool",
-          kind: "area",
-          stacked: true,
-          smooth: true,
-          unit: "tok",
-          series: TOKEN_SERIES,
-          height: 240,
-        })
-      : null,
-    jsx(Collapse, { label: "Show per-turn & step token table", children:
-      hasSteps
-        ? jsx("div", { className: "tg-scrollable", children: jsx(TurnStepTable, { steps: s.stepTree }) })
-        : (s.toolTokens && s.toolTokens.length)
-          ? estimatedToolTable(s.toolTokens)
-          : jsx("div", { className: "tg-muted", style: { fontSize: 13, padding: "8px 4px" }, children: "No per-step token data for this session yet." })
-    }),
-    jsx("div", { className: "tg-faint", style: { fontSize: 10, marginTop: 6 }, children: "In/Out/Cache = the LLM context tokens the session moved (cache = read + write). Thinking = reasoning tokens (≈ estimated from reasoning text when the provider reports 0). Tools = estimated tokens of the tool-call arguments (chars/4). Each turn in the table shows its own column totals." }),
-  ]});
-};
-
-// Tokens-tab drawer: run summary + the graph/collapse body above.
-export const tokenTreeDrawer = (s: any) => {
-  const m = s.meta || {};
-  const stepCount = s.events ? (s.events.steps || 0) : (s.stepTree ? s.stepTree.reduce((n: number, t: any) => n + t.steps.length, 0) : 0);
-  const meta: [string, any][] = [
-    ["Project", s.cwd],
-    ["Turns", s.turns || null],
-    ["Steps", stepCount || null],
-    ["Models", s.modelMix],
-    ["LLM time", s.llmMs ? fmtMs(s.llmMs) : null],
-    ["Speed", s.tokPerSec != null ? s.tokPerSec + " tok/s" : null],
-    ["Last model", m.lastUsedModel ? m.lastUsedModel.model + " · " + (m.lastUsedModel.provider || "?") : null],
-  ];
-  return jsxs("div", { className: "tg-drawer-inner", children: [
-    metaGrid(meta),
-    jsx(TokenDrawerBody, { s }),
-  ]});
-};
 
 // ── Combined temp-tab drawer: merges the Perf drawer (step decode/prefill
 // ── speed) with the Tokens drawer (per-turn → step token breakdown). Each
@@ -757,32 +580,28 @@ export const combinedDrawer = (s: any, opts: { defaultClosed?: boolean } = {}) =
   // WINDOW (before the first compaction, between two, after the last) gets its
   // own color and a togglable chip: one chip click removes (or restores) the
   // whole window — its dots, its context line, and the ✂ lines it bounds.
-  const REGIME_COLORS = ["#e5e7eb", "#f87171", "#fb923c", "#a3e635", "#38bdf8", "#f43f5e", "#d946ef", "#94a3b8"];
+  // The Lines / Both / Dots switch above the plot turns the whole panel into a
+  // scatter (a dot per step, no connecting line, no area fill); the chips and
+  // that mode are persisted per chart (client/graph-store.ts).
+  // Window colours. The 8th used to be the same grey as the "out" metric line —
+  // no colour is shared with PERF_METRICS any more.
+  const REGIME_COLORS = ["#e5e7eb", "#f87171", "#fb923c", "#a3e635", "#38bdf8", "#f43f5e", "#d946ef", "#22d3ee"];
   // The scatter metrics: one dot series each, fixed color per metric (the
   // window colors are reserved for the context-fill lines + chips).
+  // One DISTINCT colour per metric — out and cache used to share the same grey,
+  // which made their two lines impossible to tell apart where they crossed (the
+  // tooltip could not be checked against the chart). cache keeps the teal the
+  // rest of the plugin uses for cache tokens.
   const PERF_METRICS = [
     { key: "in", name: "in", color: "#4ade80", unit: "tok" },
     { key: "out", name: "out", color: "#94a3b8", unit: "tok" },
     { key: "thinking", name: "thinking", color: "#c084fc", unit: "tok",  radius: 2 },
-    { key: "cache", name: "cache", color: "#94a3b8", unit: "tok" },
+    { key: "cache", name: "cache", color: "#2dd4bf", unit: "tok" },
     { key: "pf", name: "prefill", color: "#fb923c", unit: "tok/s" },
     { key: "dc", name: "decode", color: "#facc15", unit: "tok/s" },
   ];
-  // Pre-formatted multi-line tooltip text for one step (the single shared box).
-  const tipFor = (r: any): string => {
-    const tok: string[] = [];
-    if (r.in != null) tok.push("in " + fmtC(r.in));
-    if (r.out != null) tok.push("out " + fmtC(r.out));
-    if (r.cache != null) tok.push("cache " + fmtC(r.cache));
-    if (r.thinking != null) tok.push("think" + (r.thinkEst ? "≈" : "") + " " + fmtC(r.thinking));
-    const spd: string[] = [];
-    if (r.pf != null) spd.push("prefill " + r.pf + " tok/s");
-    if (r.dc != null) spd.push("decode " + r.dc + " tok/s");
-    const L = [r.label + " · ctx " + fmtC(r.ctx)];
-    if (tok.length) L.push(tok.join(" · "));
-    if (spd.length) L.push(spd.join(" · "));
-    return L.join("\n");
-  };
+  // The shared hover tooltip is built by the chart from the row fields (one
+  // colour-coded line per series), so every number can be matched to its line.
   const regimeRows: Record<number, any[]> = {};
   // Global step index (session time order) - the x-axis. A context SAWTOOTH
   // needs x = time: drawn against x = context size, within a window ctx grows
@@ -807,7 +626,6 @@ export const combinedDrawer = (s: any, opts: { defaultClosed?: boolean } = {}) =
       thinkEst: !!st.thinkingEstimated,
       label: "T" + st.turn + "S" + st.step,
     };
-    row.tip = tipFor(row);
     stepG[st.turn + ":" + st.step] = gIdx;
     (regimeRows[r] || (regimeRows[r] = [])).push(row);
     gIdx++;
@@ -834,7 +652,7 @@ export const combinedDrawer = (s: any, opts: { defaultClosed?: boolean } = {}) =
       const first = regimeRows[next][0];
       lineRows.push({ g: first.g, ctx: first.ctx, label: name + " -> reset" });
     }
-    perfSeries.push({ key: "ctx", label: name, color: c, unit: "ctx", axis: 0, regime: r, line: true, fill: true, data: lineRows });
+    perfSeries.push({ key: "ctx", label: name, tipName: "ctx", color: c, unit: "tok", axis: 0, regime: r, line: true, fill: true, data: lineRows });
     // Metric lines — one series per metric on the right LOG axis, all sharing
     // the window's regime so one chip toggles the whole window (lines + context
     // line + its ✂ boundaries).
@@ -851,14 +669,15 @@ export const combinedDrawer = (s: any, opts: { defaultClosed?: boolean } = {}) =
   const perfRules = (s.compactionEvents || [])
     .filter((c: any) => c.contextBefore != null && c.afterTurn != null && c.afterStep != null && stepG[c.afterTurn + ":" + c.afterStep] != null)
     .map((c: any) => ({
-      // x: stepG[c.afterTurn + ":" + c.afterStep],
-      // label: "✂ C" + c.index,
-      // tip: "Compaction " + c.index + " · after Turn " + c.afterTurn + " · Step " + c.afterStep + " · context " + fmtC(c.contextBefore) + " tok",
-      // color: "#f472b6",
-      // windows: [c.index - 1, c.index] as [number, number],
+      x: stepG[c.afterTurn + ":" + c.afterStep],
+      label: "✂ C" + c.index,
+      tip: "Compaction " + c.index + " · after Turn " + c.afterTurn + " · Step " + c.afterStep + " · context " + fmtC(c.contextBefore) + " tok",
+      color: "#f472b6",
+      windows: [c.index - 1, c.index] as [number, number],
     }));
   const perfHas = perfSeries.length > 0;
   const meta: [string, any][] = [
+    ["Source", sourceMeta(s)],
     ["Project", s.cwd],
     ["Turns", s.turns || null],
     ["Steps", stepCount || null],
@@ -876,27 +695,33 @@ export const combinedDrawer = (s: any, opts: { defaultClosed?: boolean } = {}) =
     perfHas ? jsxs("div", { style: { marginBottom: 14 }, children: [
       jsxs("div", { style: { display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 10 }, children: [
         jsx("div", { className: "tg-drawer-sec", style: { marginBottom: 0 }, children: "Performance & context — over steps" }),
-        jsx("div", { className: "tg-faint", style: { fontSize: 10 }, children: "left = context (linear) · right = log (dots)" }),
+        jsx("div", { className: "tg-faint", style: { fontSize: 10 }, children: "left = context (linear) · right = metrics (log)" }),
       ]}),
-      jsx(AmBarChart, {
-        data: [], kind: "scatter", xField: "g", labelField: "label", xLabel: "step", xUnit: "",
+      // Drawn by the plugin's own canvas engine (client/graph.ts) instead of
+      // the vendored amCharts bundle — the first chart migrated, see
+      // client/graph-canvas.tsx.
+      jsx(GraphCanvas, {
+        xField: "g", xLabel: "step", xUnit: "",
         xStep: Math.max(1, Math.round(gIdx / 12)),
         series: perfSeries,
+        axes: [
+          { unit: "ctx" },
+          { log: true, hideLabels: true, unit: "tok" },
+        ],
         rules: perfRules,
         legendChips: true,
         chips: perfChips,
         metricChips: PERF_METRICS.map((m) => ({ name: m.name + " · " + m.unit, color: m.color, k: m.key })),
-        logAxes: [1],
-        hideAxisLabels: [1],
-        tipField: "tip",
+        tipHeadField: "label",
         tipData: perfTipRows,
-        tipAxis: 1,
-        xMinControl: true,
-        xMinLabel: "x min (step)",
-        xMinStep: 1,
+        smooth: true,
+        // the Lines / Both / Dots switch above the plot, and chips + plot mode
+        // remembered across drawer opens (client/graph-store.ts)
+        modeChips: true,
+        persistKey: "perf",
         height: 400,
       }),
-      jsx("div", { className: "tg-faint", style: { fontSize: 10, marginTop: 6 }, children: "One chart for every compaction regime — x = step (session time; the shared axis auto-scales to the visible data, or pin its minimum with the x-min input). The context filling up is shown as filled area lines: each window's line (left axis = context size) rises step by step as the context fills, then drops at its ✂ compaction to the next window's starting context — the session's context sawtooth, in the window's color. Every step also plots as lines on the right log axis, one color per metric — in / out / thinking / cache (tokens) and prefill / decode (tok/s); hover any line for that step's full stats in one box. Click a window chip to remove or restore a whole window: its lines, its context area and the ✂ boundary lines it bounds all hide with it, and the x-axis rescales to the remaining windows. Each ✂ line marks a compaction, drawn at the step after which it ran: windows left of ✂ C1 ran before compaction 1, between ✂ C1 and ✂ C2 after it, and so on." }),
+      jsx("div", { className: "tg-faint", style: { fontSize: 10, marginTop: 6 }, children: "One chart for every compaction regime — x = step (session time; the shared axis auto-scales to the visible data). The context filling up is shown as filled area lines: each window's line (left axis = context size) rises step by step as the context fills, then drops at its ✂ compaction to the next window's starting context — the session's context sawtooth, in the window's color. Every step also plots on the right log axis, one color per metric — in / out / thinking / cache (tokens) and prefill / decode (tok/s); hover any point for that step's full stats in one box. The mode switch re-draws the same data five ways: Lines and Both connect the steps, Dots is a scatter (a dot per step), Trend is a rolling median/mean/EMA through those dots (the raw steps stay faint behind it), and Heat is a grid of one row per metric against one column per step, shaded by value. Every chip and the plot mode are remembered, and how Trend and Heat behave — statistic, window, spread band, rows, ramp, shading, binning — is set in the settings tab under “Chart defaults”. Click a window chip to remove or restore a whole window: its lines, its context area and the ✂ boundary lines it bounds all hide with it, and the x-axis rescales to the remaining windows. Each ✂ line marks a compaction, drawn at the step after which it ran: windows left of ✂ C1 ran before compaction 1, between ✂ C1 and ✂ C2 after it, and so on." }),
     ]}) : null,
     jsx(TurnTimelineSection, { s }),
     jsxs("div", { style: { marginBottom: 14 }, children: [

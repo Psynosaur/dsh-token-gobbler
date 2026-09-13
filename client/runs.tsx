@@ -18,14 +18,17 @@
 // is time-weighted (Σtokens ÷ Σtime), never a mean of per-session means.
 import { fmt, fmtC, fmtMs, thL, thR, tdL, tdR, badgeGrid } from "./core";
 import { costCard } from "./panels";
-import { AmBarChart } from "./amchart";
+import { GraphCanvas } from "./graph-canvas";
 import { Collapse } from "./drawers";
+import { LOCAL_ID, sourceInfo } from "./sources";
 
 const shortId = (id: string): string => String(id || "").replace(/^session-/, "").slice(0, 8);
 
 /** One model's run inside one session (the per-model rollup, not the session). */
 type Run = {
   id: string; date: string; title: string;
+  /** The home the session ran in ("local" = this machine, else an import id). */
+  source: string;
   steps: number;
   in: number; out: number; cache: number; think: number; ctx: number;
   dTok: number; dMs: number; pTok: number; pMs: number; pSteps: number;
@@ -64,6 +67,7 @@ function makeRun(s: any, m: any): Run {
   const steps = m.steps || 0;
   const run: Run = {
     id: s.id, date: s.date || "", title: s.title || s.cwd || s.id,
+    source: String(s.source || LOCAL_ID),
     steps,
     in: b.uncachedInputTokens || 0,
     out: b.outputTokens || 0,
@@ -170,22 +174,92 @@ const allocBar = (g: Group): any => {
   ]});
 };
 
-/** The per-session speed chart — no axis labels, session id + speeds in the tooltip. */
-const runChart = (g: Group): any =>
-  jsx(AmBarChart, {
-    data: g.runs.map((r) => ({
-      cat: shortId(r.id),
-      decode: r.decode ?? 0,
-      prefill: r.prefill ?? 0,
-    })),
-    categoryField: "cat",
-    hideCategoryLabels: true, // same model on every bar — the axis would only repeat itself
-    series: [
-      { key: "decode", label: "Decode", color: "#38bdf8", unit: "tok/s", axis: 0 },
-      { key: "prefill", label: "Prefill", color: "#2dd4bf", unit: "tok/s", axis: 1 },
-    ],
-    height: 220,
+/** A home's name for the chart: this machine, or the import's own label. */
+const sourceName = (id: string): string => {
+  if (id === LOCAL_ID) return "This machine";
+  const info = sourceInfo(id);
+  return info ? info.label : id;
+};
+
+/** True when a model's runs came from more than one home (an import is folded in). */
+const hasMultiHome = (g: Group): boolean => g.runs.some((r) => r.source !== (g.runs.length ? g.runs[0].source : ""));
+
+/** One chip + one line per metric — the same four numbers the run table below
+ *  carries. Decode rides the LEFT linear axis; prefill (tok/s), TTFT (s) and ctx
+ *  (tok) share the RIGHT log axis with its labels dropped, because their scales
+ *  differ by orders of magnitude and the tooltip carries every value anyway. */
+const RUN_METRICS: { key: string; name: string; color: string; unit: string; axis: number; fill?: boolean }[] = [
+  { key: "decode", name: "Decode", color: "#38bdf8", unit: "tok/s", axis: 0, fill: true },
+  { key: "prefill", name: "Prefill", color: "#2dd4bf", unit: "tok/s", axis: 1 },
+  { key: "ttft", name: "Avg TTFT", color: "#fbbf24", unit: "s", axis: 1 },
+  { key: "ctx", name: "Avg ctx", color: "#a78bfa", unit: "tok", axis: 1 },
+];
+
+/** Chip colours for the homes a model ran in; the first is this machine. Every
+ *  home after the first also gets a dashed line, so the split survives a
+ *  colour-blind reading. */
+const SOURCE_COLORS = ["#60a5fa", "#fbbf24", "#34d399", "#f472b6", "#a78bfa"];
+
+/** The per-run chart: a line (or a trend) per metric, one x tick per run date.
+ *
+ *  This replaced a per-run BAR chart, which could not be read: 26 same-model
+ *  bars standing on two unrelated scales (a 66 tok/s decode bar beside a 989
+ *  tok/s prefill bar implied a comparison that did not exist), a run with no
+ *  measured speed plotted as a zero rather than as unknown, and nothing at all
+ *  about the one question the tab exists to answer — whether the model is
+ *  getting faster. Same engine as the step chart in the drawer, so Lines / Both
+ *  / Dots / Trend / Heat all work, hiding a metric rescales the value axes, a
+ *  null is a gap in the line, and the tooltip carries the run's whole row.
+ *
+ *  A model whose runs came from more than one home (an imported machine) is
+ *  split per home with a chip each: an import's slower runs would otherwise be
+ *  read as this machine's regression. */
+function runChart(g: Group): any {
+  const homes: string[] = [];
+  for (const r of g.runs) if (!homes.includes(r.source)) homes.push(r.source);
+  const split = homes.length > 1;
+  const rowsOf = (sid?: string) => g.runs
+    .map((r, i) => ({ r, i }))
+    .filter(({ r }) => !sid || r.source === sid)
+    .map(({ r, i }) => ({
+      n: i,
+      // the head of the hover box: which run, and (when the model spans homes)
+      // which home it ran in
+      label: (r.date || "?") + " · " + shortId(r.id) + (split ? " · " + sourceName(r.source) : ""),
+      decode: r.decode,
+      prefill: r.prefill,
+      ttft: r.ttftMs != null ? Math.round(r.ttftMs / 100) / 10 : null,
+      ctx: r.avgCtx,
+    }));
+  const all = rowsOf();
+  const series = (split ? homes.map((sid) => ({ sid })) : [{ sid: "" }]).flatMap(({ sid }) =>
+    RUN_METRICS.map((m) => ({
+      key: m.key, label: m.name, tipName: m.name, color: m.color, unit: m.unit, axis: m.axis,
+      line: true, fill: m.fill,
+      dash: split && homes.indexOf(sid) > 0 ? [4, 3] : undefined,
+      regime: split ? sid : undefined,
+      data: split ? rowsOf(sid) : all,
+    })));
+  return jsx(GraphCanvas, {
+    data: all,
+    xField: "n",
+    xLabel: "run",
+    xStep: Math.max(1, Math.round(all.length / 8)),
+    // The x axis is the run's ORDINAL — every run weighs the same — but each
+    // tick is LABELLED with that run's date, so the sequence still reads as time.
+    xTickFormat: (v: number) => { const r = g.runs[Math.round(v)]; return r && r.date ? r.date.slice(5) : ""; },
+    series,
+    axes: [{ unit: "tok/s" }, { log: true, hideLabels: true, unit: "tok/s" }],
+    chips: split ? homes.map((sid, si) => ({ name: sourceName(sid), color: SOURCE_COLORS[si % SOURCE_COLORS.length], k: sid })) : undefined,
+    metricChips: RUN_METRICS.map((m) => ({ name: m.name + " · " + m.unit, color: m.color, k: m.key })),
+    tipHeadField: "label",
+    tipData: all,
+    smooth: true,
+    modeChips: true,
+    persistKey: "runs",
+    height: 260,
   });
+}
 
 function groupBody(g: Group): any {
   const perf = jsxs("div", { children: [
@@ -306,7 +380,7 @@ export function RunsTab({ bySession }: { bySession: any[] }) {
   return jsxs("div", { style: { display: "flex", flexDirection: "column", gap: 24 }, children: [
     jsxs("div", { children: [
       jsx("div", { className: "tg-label", style: { marginBottom: 4 }, children: "🏁 Runs by model — like-for-like over time" }),
-      jsx("div", { className: "tg-faint", style: { fontSize: 11, lineHeight: 1.6 }, children: "Sessions are grouped by the model that served them, so a model is only ever compared against itself. Only single-model sessions are counted here — sessions that switched models are held out in the Mix drawer at the bottom, where a blended rate can't distort a model's average. Expand a model for its aggregate token performance and allocation, and a per-session speed chart — the chart carries no axis labels because every bar is the same model: hover a bar for the session id and its speeds. Leader = most tokens." }),
+      jsx("div", { className: "tg-faint", style: { fontSize: 11, lineHeight: 1.6 }, children: "Sessions are grouped by the model that served them, so a model is only ever compared against itself. Only single-model sessions are counted here — sessions that switched models are held out in the Mix drawer at the bottom, where a blended rate can't distort a model's average. Expand a model for its aggregate token performance and allocation, and a per-run speed chart drawn by the same canvas engine as the step chart (Lines / Dots / Trend / Heat, metric chips, hover for the run). Leader = most tokens." }),
     ]}),
     ...groups.map((g) => {
       const isOpen = open === g.key;
@@ -324,7 +398,7 @@ export function RunsTab({ bySession }: { bySession: any[] }) {
         jsx(Collapse, { label: head, defaultOpen: isOpen, onOpenChange: (o: boolean) => setOpen(o ? g.key : null), children: jsxs("div", { style: { display: "flex", flexDirection: "column", gap: 22 }, children: [
           jsxs("div", { children: [
             jsx("div", { className: "tg-label", style: { marginBottom: 4 }, children: "📈 Speeds per run — same model, oldest → newest" }),
-            jsx("div", { className: "tg-faint", style: { fontSize: 11, marginBottom: 8 }, children: "Decode on the left axis, prefill on the right (prefill runs an order of magnitude faster, so they must not share a scale). No category labels: hover any bar to read the session id and its speeds." }),
+            jsx("div", { className: "tg-faint", style: { fontSize: 11, marginBottom: 8 }, children: "One line per metric, one x tick per run date — the x axis is the run's ordinal, so every run weighs the same. Decode is on the left linear axis; prefill, TTFT and ctx share the right log axis (their scales differ by orders of magnitude, so its labels are dropped and the tooltip carries the values). Click a metric chip to drop it — the axes rescale to what is left — or switch the plot to Trend to read the model's trajectory instead of every spike. A run with no measured speed is a gap, never a zero." + (hasMultiHome(g) ? " These runs came from more than one home, so each home has its own chip: an import's slower runs would otherwise read as this machine's regression." : "") }),
             runChart(g),
           ]}),
           groupBody(g),

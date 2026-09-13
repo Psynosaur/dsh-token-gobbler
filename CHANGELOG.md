@@ -1,5 +1,71 @@
 # Changelog
 
+## 1.1.0
+
+### Minor Changes
+
+- Every chart is now drawn by the plugin's own canvas engine — the vendored amCharts bundle is gone.
+  
+  - **The Runs tab is drawn by that engine.** The per-model chart is one line per metric — Decode on the
+    left linear axis; Prefill, Avg TTFT and Avg ctx sharing the right log axis — over the runs' ordinals,
+    with every x tick labelled by that run's date. It gains the Lines / Both / Dots / Trend / Heat switch,
+    metric chips that rescale the axes, one hover box carrying the run's whole row, and remembered
+    per-chart state. The bar chart it replaced put a 66 tok/s decode bar beside a 989 tok/s prefill bar on
+    two unrelated scales, drew a run with no measured speed as a zero, and could not answer the tab's
+    actual question — whether the model is improving. **Trend** answers it.
+  - **A model that ran in more than one home is split per home** (imported sources), one chip each and a
+    dashed line for the import, so an imported machine's slower runs are not read as this machine's
+    regression.
+  - **Every other chart moved to the same engine**: the Performance tab's daily token totals (log) and
+    daily speed/TTFT, the Llama Metrics live throughput / requests / speculative-acceptance charts (the
+    acceptance rate now reads as a real percentage, 0–100), and the Cost tab's "by day" and "by session"
+    columns — which open in the engine's new **Bars** plot mode.
+  - **The engine gained the two features the port needed**: `xTickFormat` (a numeric index axis labelled
+    as its dates/categories, in the ticks *and* the hover box) and a `bars` plot mode (one bar per point
+    grown from the axis floor; several series share the slot side by side). The plot-mode list the
+    settings store validates against is now DERIVED from the engine's own list — a hard-coded copy had
+    silently rejected the new mode and reset a saved choice back to Lines.
+  - **The settings section is a stack of drawers** — Cost (which opens itself), Tokens, Speed, Activity,
+    Chart defaults and Imported sources, in that order — each head carrying the at-a-glance numbers while
+    the cards stay folded, with the imported homes as the LAST drawer. The row layout was fixed with it:
+    the hint text used to be the grid's third column, which the narrow settings pane squeezed into a
+    clipped ribbon (or pushed clean out of the card); it now takes its own full-width line under the
+    label and control.
+  - **Removed the vendored amCharts bundle** — `client/amchart.tsx` (the wrapper + script loader), the
+    `/token-gobbler/vendor` route and `AMCHARTS_ROOT` in `lib/index.ts`, `vendor/amcharts` (5 tracked
+    files, 11.7 MB — 11.1 MB of it a font subset) and its `.tg-amchart*` / turn-chip / x-min CSS. The
+    client bundle drops from 297 kB to 275 kB and no chart library is fetched into the host page.
+  - **Removed the dead drawers** — `TokenSpendChart`, `perfDrawer`, `tokenTreeDrawer` /
+    `TokenDrawerBody` and their helpers were unreferenced (the old Tokens tab was superseded by the
+    combined drawer): ~130 lines gone.
+  - **Fixes** — `sources.test.js` now pins `DSH_HOME` for its whole route test (its first `GET` read the
+    real `~/.dsh/token-gobbler/sources.json` and failed as soon as a home was actually imported), and the
+    client bundle builds again (a shadowed `rows` binding in `client/panels.tsx` broke it — esbuild is
+    the only thing that type-checks the client sources, so `npm run build` is the gate, not the tests).
+- Imported sources: read other machines' DSH homes (Windows on a mounted drive, macOS on `/Volumes`, a
+  synced `~/.dsh`, or just its `sessions/` folder) alongside the local one.
+  
+  - **Register another DSH home and fold its sessions into every number** — Settings › Token Gobbler ›
+    **🔌 Imported sources** lists each home with its OS, path, session/trajectory/token counts and last
+    sync, and manages it: **＋ Import source** (a full `.dsh` home, its `sessions/` folder, a projection
+    store, or a bare copy of a sessions tree), **🔍 Scan for DSH homes** (probes `/mnt`, `/media/<you>`,
+    `/run/media/<you>`, `/Volumes` and your home), **↻ Resync** (re-reads that home only — its cached
+    parses are dropped, the rest of the dashboard keeps its warm cache), **⏸ Pause**, and **✕ Remove**
+    (two-step; the imported files are never touched). Read-only on the other machine: the registry lives
+    in this home's `token-gobbler/sources.json`.
+  - **Every imported session is marked** — a 🪟/🍎/🐧 badge naming its home in every session table and
+    drawer, plus a source chip row in the activity modal that filters all tabs to one home. A summary
+    line under the settings header says which homes are folded in.
+  - **Cross-home merge rules** — the OS is read from the sessions' own cwds (`D:\models\…` on a Windows
+    volume mounted anywhere), a session id held by two homes is counted once (this machine wins, and the
+    duplicate is reported per source), archived state is read from each home's own `workspace.json`, and
+    an import with trajectories but no projection store still reports — its rows are rebuilt from the
+    trajectory (tokens, steps, cwd, createdAt).
+  - **`lib/sources.ts`** — the import registry (`<dsh home>/token-gobbler/sources.json`), layout and OS
+    detection, and a cheap (parse-free) scan; **`/token-gobbler/sources`** GET/POST routes;
+    **`invalidateTrajectoryCache(prefix)`** so a resync/removal also drops those entries from the
+    persisted parse cache.
+
 All notable changes to `token-gobbler` are documented here.
 
 ## [1.0.0] - 2026-09-12

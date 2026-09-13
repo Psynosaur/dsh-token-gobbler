@@ -8,7 +8,7 @@
 
 import { fmt, fmtC, fmtMs, badgeGrid } from "./core";
 import { costCard } from "./panels";
-import { AmBarChart } from "./amchart";
+import { GraphCanvas } from "./graph-canvas";
 
 // ── Prometheus metrics parser ──────────────────────────────────────────
 
@@ -402,6 +402,15 @@ export function LlamaMetricsTab() {
     ]
   });
 
+  // The canvas engine plots a NUMERIC x, so a live series gets an ordinal and the
+  // clock time rides the tick label (client/graph.ts xTickFormat).
+  const liveRows = (rows: any[]) => rows.map((r: any, i: number) => ({ ...r, n: i }));
+  const liveTick = (rows: any[]) => (v: number) => { const r = rows[Math.round(v)]; return r && r.time ? String(r.time).slice(-5) : ""; };
+  const tpRows = liveRows(throughputHistory);
+  const rqRows = liveRows(requestHistory);
+  // The acceptance rate is stored as a fraction; percent is what the axis means.
+  const specRows = liveRows(specHistory).map((r: any) => ({ ...r, rate: (r.rate || 0) * 100 }));
+
   // Throughput chart
   const throughputChart = throughputHistory.length > 1 ? jsxs("div", {
     style: { marginTop: 24 },
@@ -411,15 +420,16 @@ export function LlamaMetricsTab() {
         style: { marginBottom: 8 },
         children: "📈 Throughput over time (tok/s)"
       }),
-      jsx(AmBarChart, {
-        data: throughputHistory,
-        categoryField: "time",
-        kind: "line",
-        smooth: true,
+      jsx(GraphCanvas, {
+        data: tpRows,
+        xField: "n", xLabel: "time", xTickFormat: liveTick(tpRows),
         series: [
-          { key: "prompt", label: "Prompt", color: "#38bdf8", unit: "tok/s", axis: 0 },
-          { key: "gen", label: "Generation", color: "#a78bfa", unit: "tok/s", axis: 0 },
+          { key: "prompt", label: "Prompt", tipName: "prompt", color: "#38bdf8", unit: "tok/s", axis: 0, line: true, fill: true },
+          { key: "gen", label: "Generation", tipName: "generation", color: "#a78bfa", unit: "tok/s", axis: 0, line: true, fill: true },
         ],
+        axes: [{ unit: "tok/s" }],
+        legendChips: true, legendUnit: "tok/s",
+        persistKey: "llama-throughput",
         height: 200,
       }),
     ]
@@ -434,15 +444,16 @@ export function LlamaMetricsTab() {
         style: { marginBottom: 8 },
         children: "📊 Requests over time"
       }),
-      jsx(AmBarChart, {
-        data: requestHistory,
-        categoryField: "time",
-        kind: "line",
-        smooth: true,
+      jsx(GraphCanvas, {
+        data: rqRows,
+        xField: "n", xLabel: "time", xTickFormat: liveTick(rqRows),
         series: [
-          { key: "processing", label: "Processing", color: "#fbbf24", unit: "req", axis: 0 },
-          { key: "deferred", label: "Deferred", color: "#f472b6", unit: "req", axis: 0 },
+          { key: "processing", label: "Processing", tipName: "processing", color: "#fbbf24", unit: "req", axis: 0, line: true },
+          { key: "deferred", label: "Deferred", tipName: "deferred", color: "#f472b6", unit: "req", axis: 0, line: true },
         ],
+        axes: [{ unit: "req" }],
+        legendChips: true, legendUnit: "req",
+        persistKey: "llama-requests",
         height: 160,
       }),
     ]
@@ -457,14 +468,15 @@ export function LlamaMetricsTab() {
         style: { marginBottom: 8 },
         children: "🎯 Speculative decoding acceptance rate over time"
       }),
-      jsx(AmBarChart, {
-        data: specHistory,
-        categoryField: "time",
-        kind: "line",
-        smooth: true,
+      jsx(GraphCanvas, {
+        data: specRows,
+        xField: "n", xLabel: "time", xTickFormat: liveTick(specRows),
         series: [
-          { key: "rate", label: "Acceptance rate", color: "#34d399", unit: "%", axis: 0 },
+          { key: "rate", label: "Acceptance rate", tipName: "accepted", color: "#34d399", unit: "%", axis: 0, line: true, fill: true },
         ],
+        axes: [{ unit: "%", max: 100 }],
+        legendChips: true, legendUnit: "%",
+        persistKey: "llama-spec",
         height: 160,
       }),
     ]

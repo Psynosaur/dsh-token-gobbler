@@ -6,7 +6,8 @@
 // Tokens, Combined, Daily, Sessions, Cost — builds its table from this instead
 // of hand-rolling rows, chevrons and drawer rows.
 import { fmt, fmtC, fmtMs, money } from "./core";
-import { TgTable, type Column } from "./table";
+import { isImported, sourceBadge } from "./sources";
+import { TgTable, type Column, type SortState } from "./table";
 
 /** Session prefill speed = new (uncached) input tokens ÷ TTFT across all steps
  *  that carry timing (ratio of sums — same math as the server aggregates, so a
@@ -55,10 +56,16 @@ export interface SessionColumnsOpts {
   tcache?: boolean;  // "Cache" (cache read) tokens
 }
 
-/** Session title cell — archived sessions (archived in the DSH GUI) get a 📦 marker. */
-const sessionTitle = (s: any) => s.archived
-  ? jsxs("span", { title: "archived in DSH", children: [jsx("span", { className: "tg-archived-badge" }, "📦"), " ", s.title || s.cwd || s.id] })
-  : (s.title || s.cwd || s.id);
+/** Session title cell — archived sessions (archived in the DSH GUI) get a 📦
+ *  marker, sessions that came from an IMPORTED home get their home's badge
+ *  (🪟 Windows box, 🍎 Mac, 🐧 another Linux home) in front of the name. */
+const sessionTitle = (s: any) => {
+  const name = s.archived
+    ? jsxs("span", { title: "archived in DSH", children: [jsx("span", { className: "tg-archived-badge" }, "📦"), " ", s.title || s.cwd || s.id] })
+    : (s.title || s.cwd || s.id);
+  if (!isImported(s)) return name;
+  return jsxs("span", { className: "tg-sess-title", children: [sourceBadge(s), jsx("span", { children: name }, "name")] });
+};
 
 /** The shared session column set. Default = the Daily/Combined shape:
  *  Date | Session | Models | Steps | Decode | Prefill | Runtime | Total. */
@@ -67,16 +74,16 @@ export const sessionColumns = (o: SessionColumnsOpts = {}): Column[] => {
   return [
     { key: "date", label: "Date" },
     { key: "title", label: "Session", render: sessionTitle },
-    lastActive ? { key: "lastActive", label: "Last Active", align: "r" as const, render: lastActiveLabel, props: { style: { color: "#94a3b8", fontSize: 12 } } } : null,
+    lastActive ? { key: "meta.lastPromptAt", label: "Last Active", align: "r" as const, render: lastActiveLabel, props: { style: { color: "#94a3b8", fontSize: 12 } } } : null,
     { key: "modelMix", label: "Models", render: (s: any) => s.modelMix, props: { style: { whiteSpace: "normal", wordBreak: "break-word", overflow: "visible", textOverflow: "unset" } } },
     turns ? { key: "turns", label: "Turns", align: "r" as const, render: (s: any) => (s.stepTree || []).length || "—" } : null,
-    { key: "steps", label: "Steps", align: "r" as const, render: (s: any) => s.events ? (s.events.steps || 0) : "—" },
+    { key: "steps", sortKey: "events.steps", label: "Steps", align: "r" as const, render: (s: any) => s.events ? (s.events.steps || 0) : "—" },
     decode ? { key: "tokPerSec", label: "Decode", align: "r" as const, render: (s: any) => s.tokPerSec != null ? s.tokPerSec + " tok/s" : "—" } : null,
     prefill ? { key: "prefillPerSec", label: "Prefill", align: "r" as const, render: sessionPrefill, props: (s: any) => ({ title: "prompt processing = new (uncached) input tokens ÷ TTFT across all " + (s.steps || []).length + " step(s)" }) } : null,
     runtime ? { key: "runtime", label: "Runtime", align: "r" as const, render: sessionRuntime, props: { title: "session runtime = sum of (TTFT + decode time) across all steps — decode already contains the thinking window, so it is not added again" } } : null,
-    tin ? { key: "tin", label: "In", align: "r" as const, render: (s: any) => fmtC(s.uncachedInputTokens), props: (s: any) => ({ title: fmt(s.uncachedInputTokens) }) } : null,
-    tout ? { key: "tout", label: "Out", align: "r" as const, render: (s: any) => fmtC(s.outputTokens), props: (s: any) => ({ title: fmt(s.outputTokens) }) } : null,
-    tcache ? { key: "tcache", label: "Cache", align: "r" as const, render: (s: any) => fmtC(s.cacheReadTokens), props: (s: any) => ({ title: fmt(s.cacheReadTokens) }) } : null,
+    tin ? { key: "tin", sortKey: "uncachedInputTokens", label: "In", align: "r" as const, render: (s: any) => fmtC(s.uncachedInputTokens), props: (s: any) => ({ title: fmt(s.uncachedInputTokens) }) } : null,
+    tout ? { key: "tout", sortKey: "outputTokens", label: "Out", align: "r" as const, render: (s: any) => fmtC(s.outputTokens), props: (s: any) => ({ title: fmt(s.outputTokens) }) } : null,
+    tcache ? { key: "tcache", sortKey: "cacheReadTokens", label: "Cache", align: "r" as const, render: (s: any) => fmtC(s.cacheReadTokens), props: (s: any) => ({ title: fmt(s.cacheReadTokens) }) } : null,
     total ? { key: "allTokens", label: "Total", align: "r" as const, render: (s: any) => fmtC(s.allTokens), props: { style: { fontWeight: 600 } } } : null,
   ].filter(Boolean) as Column[];
 };
@@ -85,13 +92,13 @@ export const sessionColumns = (o: SessionColumnsOpts = {}): Column[] => {
  *  instead of the speed columns. */
 export const sessionCostColumns: Column[] = [
   { key: "date", label: "Date" },
-  { key: "title", label: "Session", render: sessionTitle, props: (s: any) => ({ style: { maxWidth: 180, whiteSpace: "normal", wordBreak: "break-word" }, title: (s.archived ? "archived in DSH — " : "") + (s.title || s.cwd || s.id) }) },
+  { key: "title", label: "Session", render: sessionTitle, props: (s: any) => ({ style: { maxWidth: 180, whiteSpace: "normal", wordBreak: "break-word" }, title: (s.archived ? "archived in DSH — " : "") + (isImported(s) ? "imported · " : "") + (s.title || s.cwd || s.id) }) },
   { key: "modelMix", label: "Models used", render: (s: any) => s.modelMix, props: (s: any) => ({ style: { maxWidth: 200, whiteSpace: "normal", wordBreak: "break-word", fontSize: 12, color: "#94a3b8" }, title: (s.models || []).map((m: any) => (m.label || m.key) + " ×" + m.steps).join("\n") }) },
-  { key: "steps", label: "Steps", align: "r", render: (s: any) => s.events ? String(s.events.steps || 0) : "—" },
-  { key: "tools", label: "Tools", align: "r", render: (s: any) => s.events ? String((s.events.toolCalls || 0) + (s.events.toolSubCalls || 0)) : "—" },
-  { key: "tin", label: "In", align: "r", render: (s: any) => fmtC(s.uncachedInputTokens), props: (s: any) => ({ title: fmt(s.uncachedInputTokens) }) },
-  { key: "tout", label: "Out", align: "r", render: (s: any) => fmtC(s.outputTokens), props: (s: any) => ({ title: fmt(s.outputTokens) }) },
-  { key: "tcache", label: "CacheR", align: "r", render: (s: any) => fmtC(s.cacheReadTokens), props: (s: any) => ({ title: fmt(s.cacheReadTokens) }) },
+  { key: "steps", sortKey: "events.steps", label: "Steps", align: "r", render: (s: any) => s.events ? String(s.events.steps || 0) : "—" },
+  { key: "tools", sortKey: "events.toolCalls", label: "Tools", align: "r", render: (s: any) => s.events ? String((s.events.toolCalls || 0) + (s.events.toolSubCalls || 0)) : "—" },
+  { key: "tin", sortKey: "uncachedInputTokens", label: "In", align: "r", render: (s: any) => fmtC(s.uncachedInputTokens), props: (s: any) => ({ title: fmt(s.uncachedInputTokens) }) },
+  { key: "tout", sortKey: "outputTokens", label: "Out", align: "r", render: (s: any) => fmtC(s.outputTokens), props: (s: any) => ({ title: fmt(s.outputTokens) }) },
+  { key: "tcache", sortKey: "cacheReadTokens", label: "CacheR", align: "r", render: (s: any) => fmtC(s.cacheReadTokens), props: (s: any) => ({ title: fmt(s.cacheReadTokens) }) },
   { key: "allTokens", label: "Total", align: "r", render: (s: any) => fmtC(s.allTokens), props: (s: any) => ({ style: { fontWeight: 700 }, title: fmt(s.allTokens) }) },
   { key: "cost", label: "Cost", align: "r", render: (s: any) => s.cost != null ? money(s.cost) : "—", props: { style: { fontWeight: 600, color: "#fde68a" } } },
 ];
@@ -107,6 +114,12 @@ export interface SessionTableOpts {
   empty?: any;
   /** Column-set switches for sessionColumns (default = Daily/Combined shape). */
   columns?: SessionColumnsOpts;
+  /** Current sort state. */
+  sort?: SortState;
+  /** Callback when a column header is clicked for sorting. */
+  onSort?: (col: SortState) => void;
+  /** Unique key for persisting sort state to localStorage. */
+  sortKey?: string;
 }
 
 /** The per-session table on the shared column set — TgTable + sessionColumns.
@@ -120,5 +133,8 @@ export const SessionTable = (o: SessionTableOpts) =>
     drawer: o.drawer,
     page: o.page, setPage: o.setPage, pageSize: o.pageSize,
     empty: o.empty,
-    rowClass: (s: any) => (s.archived ? "tg-archived" : ""),
+    rowClass: (s: any) => (s.archived ? "tg-archived" : "") + (isImported(s) ? " tg-imported" : ""),
+    sort: o.sort,
+    onSort: o.onSort,
+    sortKey: o.sortKey,
   });

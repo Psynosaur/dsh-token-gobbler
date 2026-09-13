@@ -21,9 +21,11 @@ import { homedir } from "node:os";
 import * as pricing from "./pricing.js";
 import * as trajectory from "./trajectory.js";
 import * as projcache from "./projcache.js";
+import * as imports from "./sources.js";
 import type { TokenBuckets, PricingEntry, RateCard, DiscoveredModel } from "./pricing.js";
-import type { ModelChange, UsageRecord, EventCounts, CompactionEvent, TurnTimeline } from "./trajectory.js";
-import type { ProjcacheResult, ProjSession } from "./projcache.js";
+import type { ModelChange, UsageRecord, EventCounts, CompactionEvent, TurnTimeline, ParsedTrajectory } from "./trajectory.js";
+import type { ProjcacheResult, ProjSession, SessionMeta } from "./projcache.js";
+import type { SourceScan } from "./sources.js";
 
 /** The models to cost the gobbling against: your free local baseline + Copilot's paid roster. */
 export const DEFAULT_CANDIDATES: Candidate[] = [
@@ -45,6 +47,8 @@ export interface ReportOptions {
   sessionsRoot?: string;
   storePath?: string;
   candidates?: Candidate[];
+  /** Also read the registered imported homes (default true). false = this machine only. */
+  imports?: boolean;
 }
 /** Resolved filesystem paths. */
 export interface ResolvedPaths {
@@ -97,6 +101,132 @@ export function resolvePaths(opts: ReportOptions = {}): ResolvedPaths {
     storeKind,
     otherStorePath,
   };
+}
+
+// ── imported sources ─────────────────────────────────────────────────────
+// The report reads ONE local DSH home plus every imported home the user registered
+// (lib/sources.ts). Sessions keep their own id as the key everywhere — ids are
+// machine-unique, and the merge claims each id for the FIRST home that has it, so
+// an import can never double-count a session that also exists locally.
+
+/** One home the report reads: the local DSH home, then every enabled import. */
+export interface ReadableSource {
+  id: string;
+  label: string;
+  os: string;
+  /** The registered path (for the local source: the DSH home). */
+  path: string;
+  /** The DSH home this source belongs to (holds workspace.json / pricing.json). */
+  home: string | null;
+  imported: boolean;
+  /** null when the home has no sessions directory. */
+  sessionsRoot: string | null;
+  storePath: string | null;
+  otherStorePath: string | null;
+  /** Why this source cannot be read (unmounted drive, no sessions found, …). */
+  error: string | null;
+}
+
+/** Per-source counters from a full report load (the trajectories were parsed). */
+export interface SourceLoadStats {
+  id: string;
+  /** Sessions owned by this home (after the cross-source duplicate claim). */
+  sessions: number;
+  tokens: number;
+  /** Trajectory files scanned. */
+  files: number;
+  withUsage: number;
+  /** Sessions skipped because an earlier home had the same id. */
+  duplicates: number;
+  /** Sessions recovered from the trajectory alone (an imported home with no store). */
+  synthetic: number;
+}
+
+/** Everything the client needs to mark and manage one source. */
+export interface SourceView {
+  id: string;
+  label: string;
+  os: string;
+  path: string;
+  imported: boolean;
+  /** os still comes from detection — a resync may refine it. */
+  osAuto: boolean;
+  enabled: boolean;
+  addedAt: number;
+  lastSyncAt: number | null;
+  error: string | null;
+  /** Cheap scan from the registry (refreshed on add / resync). */
+  scan: SourceScan | null;
+  /** Counters from the report load being served (null for a disabled/broken source). */
+  live: SourceLoadStats | null;
+}
+
+const emptyLoadStats = (id: string): SourceLoadStats => ({ id, sessions: 0, tokens: 0, files: 0, withUsage: 0, duplicates: 0, synthetic: 0 });
+
+/** The local home first, then every enabled import (unreadable ones included, flagged). */
+export function resolveAllSources(opts: ReportOptions = {}): ReadableSource[] {
+  const paths = resolvePaths(opts);
+  const out: ReadableSource[] = [{
+    id: imports.LOCAL_SOURCE_ID,
+    label: "This machine",
+    os: imports.localOs(),
+    path: paths.dshHome,
+    home: paths.dshHome,
+    imported: false,
+    sessionsRoot: paths.sessionsRoot,
+    storePath: paths.storePath,
+    otherStorePath: paths.otherStorePath,
+    error: null,
+  }];
+  if (opts.imports === false) return out;
+  for (const s of imports.readSourceRegistry(paths.dshHome).sources) {
+    if (!s.enabled) continue;
+    const layout = imports.resolveSourceLayout(s.path);
+    out.push({
+      id: s.id,
+      label: s.label,
+      os: s.os,
+      path: layout.root,
+      home: layout.dshHome,
+      imported: true,
+      sessionsRoot: existsSync(layout.sessionsRoot) ? layout.sessionsRoot : null,
+      storePath: layout.storePath,
+      otherStorePath: layout.otherStorePath,
+      error: imports.layoutError(layout),
+    });
+  }
+  return out;
+}
+
+/** Archived-in-DSH session ids, collected from every home that is being read. */
+function archivedIdsOf(all: ReadableSource[]): Set<string> {
+  const out = new Set<string>();
+  for (const s of all) if (s.home) for (const id of readArchivedSessions(s.home)) out.add(id);
+  return out;
+}
+
+/** Registry entries + the load counters of the report being served. */
+function buildSourceViews(dshHome: string, all: ReadableSource[], stats: SourceLoadStats[]): SourceView[] {
+  const liveById = new Map(all.map((s) => [s.id, s]));
+  const statsById = new Map(stats.map((s) => [s.id, s]));
+  return imports.readSourceRegistry(dshHome).sources.map((s) => {
+    const readable = liveById.get(s.id);
+    return {
+      id: s.id,
+      label: s.label,
+      os: s.os,
+      path: s.path,
+      imported: true,
+      osAuto: s.osAuto,
+      enabled: s.enabled,
+      addedAt: s.addedAt,
+      lastSyncAt: s.lastSyncAt,
+      // A live resolution error (drive unmounted right now) beats the stored one.
+      error: readable ? readable.error : s.error,
+      scan: s.stats,
+      live: readable && !readable.error ? (statsById.get(s.id) || null) : null,
+    };
+  });
 }
 
 /**
@@ -216,11 +346,12 @@ interface DiscoveredItem {
   steps: number;
 }
 
-/** Discover the distinct provider/model pairs used across the trajectory (for seeding the first table). */
+/** Discover the distinct provider/model pairs used across every trajectory read
+ *  (the local home AND each imported one), for seeding the pricing table. */
 export function discoverModels(dshHome: string, opts: ReportOptions = {}): DiscoveredItem[] {
-  const { sessionsRoot } = resolvePaths({ ...opts, dshHome });
   const map = new Map<string, DiscoveredItem>();
-  if (!existsSync(sessionsRoot)) return [];
+  const roots = resolveAllSources({ ...opts, dshHome }).map((s) => s.sessionsRoot).filter((r): r is string => !!r && existsSync(r));
+  for (const sessionsRoot of roots)
   for (const f of trajectory.findTrajectoryFiles(sessionsRoot)) {
     let t: ReturnType<typeof trajectory.readTrajectory>; try { t = trajectory.readTrajectory(f); } catch { continue; }
     if (!t) continue;
@@ -749,6 +880,11 @@ interface Sources {
   sessionsRoot: string;
   storePath: string;
   storeKind: "dir" | "file";
+  /** Every home that was read (local first), with its counters. */
+  all: ReadableSource[];
+  sourceStats: SourceLoadStats[];
+  /** Archived session ids unioned over every home being read. */
+  archived: Set<string>;
   priceCfg: PriceConfig;
   pc: ProjcacheResult;
   traj: TrajStats;
@@ -771,13 +907,61 @@ interface Sources {
   aggToolCalls: Record<string, number>;
 }
 
-/** Read projcache + trajectories + default model once; compute the per-session contribution. */
+/** A session an imported home never projected: rebuild the row from its trajectory
+ *  alone (usage buckets, turns/steps, cwd, createdAt). Keeps a "sessions folder"
+ *  copy — by far the most common way to bring another machine's work over —
+ *  fully usable instead of showing an empty dashboard. */
+function sessionFromTrajectory(id: string, source: string, t: ParsedTrajectory): ProjSession {
+  const buckets = t.usage && t.usage.length ? t.usage.reduce((b, u) => {
+    for (const k of BUCKETS) b[k] += u.buckets[k] || 0;
+    return b;
+  }, pricing.emptyBuckets()) : null;
+  const created = t.meta?.createdAt ? Date.parse(t.meta.createdAt) : NaN;
+  return {
+    id,
+    source,
+    cwd: t.meta?.cwd || null,
+    createdAt: Number.isFinite(created) ? created : null,
+    title: null,
+    turns: t.events?.turns || 0,
+    steps: t.events?.steps || 0,
+    llmMs: (t.decode?.ms || 0) + (t.prefill?.ms || 0),
+    buckets,
+    allTokens: buckets ? pricing.allTokens(buckets) : 0,
+    meta: emptySessionMeta(),
+  };
+}
+
+/** The zeroed metadata block a trajectory-only session carries (the drawers read it). */
+function emptySessionMeta(): SessionMeta {
+  return {
+    toolMs: 0, ttftMs: 0, ttftSteps: 0, decodeMs: 0, decodeTokens: 0, lastTurn: 0,
+    sandbox: null, approval: null, preset: null, agentPreset: null, lastUsedModel: null,
+    goal: null, goalFailure: null, planActive: false, todos: null,
+    contextPressure: null, contextBreakdown: null, lastPromptAt: null,
+    subagentCount: 0, subagentSettledMs: 0, llmRetries: null, turnOutline: null,
+    isSeeded: false, inheritedEventCount: 0,
+  };
+}
+
+/**
+ * Read every home (the local DSH home + each enabled import) and their
+ * trajectories once; compute the per-session contribution.
+ *
+ * Two passes, because a home may have only one of the two data sets:
+ *   1. projection stores  -> the authoritative session rows (tokens, titles, meta)
+ *   2. trajectories       -> usage, model timeline, tools, per-turn timeline
+ * A session id is CLAIMED by the first home that has it (local wins), so an
+ * imported copy of a session that also exists locally is never double-counted.
+ * An imported home with no projection store still gets rows (pass 2 synthesises
+ * them from the trajectory), which is what makes "just import the sessions
+ * folder from my other machine" work.
+ */
 function loadSources(opts: ReportOptions = {}): Sources {
-  const { dshHome, sessionsRoot, storePath, storeKind, otherStorePath } = resolvePaths(opts);
+  const { dshHome, sessionsRoot, storePath, storeKind } = resolvePaths(opts);
   const defaultModel = readDefaultModel(dshHome);
-  let pc: ProjcacheResult = { sessions: [], totals: pricing.emptyBuckets(), count: 0, nonZero: 0 };
-  // Merge BOTH stores: they hold disjoint session sets (v0 -> legacy file, v3 -> dir).
-  try { pc = projcache.readProjcacheMerged({ primary: storePath, secondary: otherStorePath }); } catch { /* keep empty */ }
+  const all = resolveAllSources(opts);
+  const sourceStats = new Map<string, SourceLoadStats>(all.map((s) => [s.id, emptyLoadStats(s.id)]));
   // NB: no llama.cpp/llama-server log — per-step prefill/decode cost and local-model
   // naming come entirely from the trajectory's own timestamps/provider/model strings.
 
@@ -797,20 +981,64 @@ function loadSources(opts: ReportOptions = {}): Sources {
   const aggEvents = trajectory.emptyEvents();
   const aggTools: Record<string, number> = {};
   const aggToolCalls: Record<string, number> = {};
-  if (existsSync(sessionsRoot)) {
-    const _cr = trajectory.loadDiskCache(dshHome); if (_cr.loaded) process.stderr.write("[token-gobbler] trajectory cache: " + _cr.loaded + " entries from disk" + "\n");
-    const files = trajectory.findTrajectoryFiles(sessionsRoot);
-    traj.files = files.length;
-    const s0 = trajectory.parseStatsSnapshot();
+
+  // ── PASS 1 · projection stores ────────────────────────────────────────
+  // Each home contributes its own store (dir layout merged with its legacy file).
+  // The FIRST home that has a session id owns it; later copies are duplicates.
+  const claimed = new Map<string, string>(); // sessionId -> owning source id
+  const pcSessions: ProjSession[] = [];
+  for (const src of all) {
+    const st = sourceStats.get(src.id) as SourceLoadStats;
+    if (!src.storePath) continue;
+    let raw: ProjcacheResult;
+    try { raw = projcache.readProjcacheMerged({ primary: src.storePath, secondary: src.otherStorePath }, src.id); }
+    catch { continue; } // an unreadable store just contributes nothing
+    for (const s of raw.sessions) {
+      if (claimed.has(s.id)) { st.duplicates++; continue; }
+      claimed.set(s.id, src.id);
+      pcSessions.push(s);
+      st.sessions++;
+      st.tokens += s.allTokens;
+    }
+  }
+
+  // ── PASS 2 · trajectories ─────────────────────────────────────────────
+  const seenTrajectory = new Set<string>(); // one copy per session id (the first home wins)
+  let cacheLoaded = false;
+  let stats0: { cacheHits: number; recomputed: number } | null = null;
+  for (const src of all) {
+    const st = sourceStats.get(src.id) as SourceLoadStats;
+    if (!src.sessionsRoot || !existsSync(src.sessionsRoot)) continue;
+    if (!cacheLoaded) {
+      cacheLoaded = true;
+      const _cr = trajectory.loadDiskCache(dshHome); if (_cr.loaded) process.stderr.write("[token-gobbler] trajectory cache: " + _cr.loaded + " entries from disk" + "\n");
+      stats0 = trajectory.parseStatsSnapshot(); // the cache counters are process-global: measure THIS load
+    }
+    const files = trajectory.findTrajectoryFiles(src.sessionsRoot);
+    traj.files += files.length;
+    st.files += files.length;
     for (const f of files) {
       let t: ReturnType<typeof trajectory.readTrajectory>;
       try { t = trajectory.readTrajectory(f); } catch { continue; }
       if (!t) continue;
       const id = t.meta?.id;
       if (!id) continue;
+      if (seenTrajectory.has(id)) continue; // a second copy of the same session (another home, or the legacy sibling)
+      seenTrajectory.add(id);
+      // A session no projection store ever saw. Imports get a row synthesised from
+      // the trajectory; the local home keeps its existing behaviour (trajectories
+      // enrich projcache rows, they never add local sessions by themselves).
+      if (!claimed.has(id) && src.imported) {
+        claimed.set(id, src.id);
+        const synth = sessionFromTrajectory(id, src.id, t);
+        pcSessions.push(synth);
+        st.sessions++;
+        st.synthetic++;
+        st.tokens += synth.allTokens;
+      }
       timelines.set(id, { modelChanges: t.modelChanges || [], stepSeqs: t.stepSeqs || [], stepTools: t.stepTools || {} });
       if (t.modelChanges.length) traj.withModelTimeline++;
-      if (t.usage.length) { traj.withUsage++; traj.usageRecords += t.usage.length; usageById.set(id, t.usage); }
+      if (t.usage.length) { traj.withUsage++; st.withUsage++; traj.usageRecords += t.usage.length; usageById.set(id, t.usage); }
       if (t.events) {
         eventsById.set(id, t.events);
         for (const k of Object.keys(aggEvents) as (keyof EventCounts)[]) aggEvents[k] += t.events[k] || 0;
@@ -831,10 +1059,24 @@ function loadSources(opts: ReportOptions = {}): Sources {
       if ((t.compactions && t.compactions.length) || t.prunes) compactionsById.set(id, { events: t.compactions || [], prunes: t.prunes || 0, prunedTokens: t.prunedTokens || 0 });
       if (t.p2p || t.p2pMentions) p2pById.set(id, { p2p: !!t.p2p, mentions: t.p2pMentions || 0 });
     }
+  }
+  if (cacheLoaded && stats0) {
     const s1 = trajectory.parseStatsSnapshot();
-    traj.cache = { hits: s1.cacheHits - s0.cacheHits, recomputed: s1.recomputed - s0.recomputed };
+    traj.cache = { hits: s1.cacheHits - stats0.cacheHits, recomputed: s1.recomputed - stats0.recomputed };
     if (traj.cache.recomputed > 0) trajectory.saveDiskCache(dshHome);
   }
+
+  // ── merge ─────────────────────────────────────────────────────────────
+  // Re-total from the merged, deduplicated session list (the per-store totals
+  // each reader computed would double-count an id that two homes both hold).
+  const pcTotals = pricing.emptyBuckets();
+  let nonZero = 0;
+  for (const s of pcSessions) {
+    if (s.buckets) for (const k of BUCKETS) pcTotals[k] += s.buckets[k];
+    if (s.allTokens > 0) nonZero++;
+  }
+  pcSessions.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+  const pc: ProjcacheResult = { sessions: pcSessions, totals: pcTotals, count: pcSessions.length, nonZero };
 
   // Build the rate-card table — the user's saved file wins; otherwise seed the FIRST
   // table from the models actually used in the trajectory.
@@ -843,7 +1085,7 @@ function loadSources(opts: ReportOptions = {}): Sources {
 
   const contrib = buildContrib(pc, timelines, usageById, defaultModel);
   const byModel = aggregateContrib(contrib);
-  return { dshHome, sessionsRoot, storePath, storeKind, priceCfg, pc, traj, defaultModel, contrib, byModel, eventsById, toolsById, toolCallsById, toolCallArgsById, stepToolArgsById, stepToolsById, usageById, stepCtxById, timelineById, compactionsById, p2pById, aggEvents, aggTools, aggToolCalls };
+  return { dshHome, sessionsRoot, storePath, storeKind, all, sourceStats: [...sourceStats.values()], archived: archivedIdsOf(all), priceCfg, pc, traj, defaultModel, contrib, byModel, eventsById, toolsById, toolCallsById, toolCallArgsById, stepToolArgsById, stepToolsById, usageById, stepCtxById, timelineById, compactionsById, p2pById, aggEvents, aggTools, aggToolCalls };
 }
 
 /** What-if candidates: the user-chosen local baseline first, then every non-local model in the user's table. */
@@ -865,7 +1107,8 @@ function candidatesFromTable(models: PricingEntry[], baselineModel?: string | nu
 }
 
 export function buildReport(opts: ReportOptions = {}) {
-  const { dshHome, sessionsRoot, storePath, storeKind, priceCfg, pc, traj, defaultModel, contrib, byModel, aggEvents, aggTools, aggToolCalls, compactionsById } = loadSources(opts);
+  const { dshHome, sessionsRoot, storePath, storeKind, all, sourceStats, priceCfg, pc, traj, defaultModel, contrib, byModel, aggEvents, aggTools, aggToolCalls, compactionsById } = loadSources(opts);
+  const localStats = sourceStats.find((s) => s.id === imports.LOCAL_SOURCE_ID) || emptyLoadStats(imports.LOCAL_SOURCE_ID);
   const candidates = opts.candidates || candidatesFromTable(priceCfg.models, priceCfg.baselineModel);
   const totals = { ...pc.totals, allTokens: pricing.allTokens(pc.totals) };
   const rawComparison = priceTotals(totals, candidates);
@@ -984,6 +1227,10 @@ export function buildReport(opts: ReportOptions = {}) {
     sources: {
       projcache: { storePath, storeKind, sessions: pc.count, nonZero: pc.nonZero },
       trajectories: { sessionsRoot, files: traj.files, withUsage: traj.withUsage, usageRecords: traj.usageRecords, withModelTimeline: traj.withModelTimeline, cache: traj.cache },
+      // The local home's own counters, and every registered import with the
+      // counters of THIS load — what the dashboard marks rows with.
+      local: { ...localStats, label: "This machine", os: imports.localOs(), path: dshHome, imported: false },
+      imported: buildSourceViews(dshHome, all, sourceStats),
     },
     totals,
     byModel,
@@ -1165,8 +1412,10 @@ function sessionTimeline(tl: TurnTimeline | undefined): SessionTimeline | null {
  * - byDay:     aggregate by local calendar day.
  */
 export function buildBreakdown(opts: ReportOptions = {}) {
-  const { dshHome, pc, traj, defaultModel, contrib, byModel, eventsById, toolsById, toolCallsById, toolCallArgsById, stepToolArgsById, stepToolsById, usageById, stepCtxById, timelineById, compactionsById, p2pById, aggEvents, aggTools, aggToolCalls } = loadSources(opts);
-  const archivedIds = readArchivedSessions(dshHome);
+  const { dshHome, all, sourceStats, archived, pc, traj, defaultModel, contrib, byModel, eventsById, toolsById, toolCallsById, toolCallArgsById, stepToolArgsById, stepToolsById, usageById, stepCtxById, timelineById, compactionsById, p2pById, aggEvents, aggTools, aggToolCalls } = loadSources(opts);
+  // Archived in DSH: the local home's set unioned with every imported home's own.
+  const archivedIds = archived;
+  const localStats = sourceStats.find((s) => s.id === imports.LOCAL_SOURCE_ID) || emptyLoadStats(imports.LOCAL_SOURCE_ID);
   const contribById = new Map(contrib.map((c) => [c.id, c]));
   const fallbackLabel = "Qwen 3.8 27B (local)";
   const tps = (tok: number, ms: number | null | undefined): number | null => (ms && ms > 0 ? Math.round((tok / (ms / 1000)) * 10) / 10 : null);
@@ -1340,6 +1589,8 @@ export function buildBreakdown(opts: ReportOptions = {}) {
       const dateTs = (lastActive != null && lastActive > (s.createdAt || 0)) ? lastActive : s.createdAt;
       return {
         id: s.id,
+        // Which home this session came from: "local" or an imported source id.
+        source: s.source,
         date: localDate(dateTs),
         cwd: s.cwd,
         title: s.title,
@@ -1437,7 +1688,12 @@ export function buildBreakdown(opts: ReportOptions = {}) {
     tools: toolsArray(aggTools),
     toolCalls: toolsArray(aggToolCalls),
     toolTokensAggregate,
-    sources: { projcache: { sessions: pc.count, nonZero: pc.nonZero }, trajectories: { withUsage: traj.withUsage, withModelTimeline: traj.withModelTimeline, cache: traj.cache } },
+    sources: {
+      projcache: { sessions: pc.count, nonZero: pc.nonZero },
+      trajectories: { withUsage: traj.withUsage, withModelTimeline: traj.withModelTimeline, cache: traj.cache },
+      local: { ...localStats, label: "This machine", os: imports.localOs(), path: dshHome, imported: false },
+      imported: buildSourceViews(dshHome, all, sourceStats),
+    },
   };
 }
 
@@ -1517,6 +1773,7 @@ export function buildPerformance(opts: ReportOptions = {}) {
       if (!models.length) return null;
       return {
         id: s.id,
+        source: s.source,
         date: localDate(s.createdAt),
         cwd: s.cwd,
         title: s.title,
@@ -1541,4 +1798,154 @@ export function buildPerformance(opts: ReportOptions = {}) {
     byModel: modelRows,
     sessions: sessionRows,
   };
+}
+
+// ── managing imported homes (add / remove / resync) ──────────────────────
+// The write side of lib/sources.ts: validate a path, register it, scan it, and
+// keep the LOCAL registry file in sync. Every function returns the same
+// SourceView shape the report embeds, so the client renders one kind of row.
+
+/** A human name for a source that was added without one. */
+function defaultSourceLabel(layout: imports.SourceLayout): string {
+  const parts = layout.root.split(/[/\\]+/).filter(Boolean);
+  const last = parts[parts.length - 1] || layout.root;
+  if (last === ".dsh" || last.startsWith(".dsh")) {
+    // "/media/<user>/<volume>/Users/<user>/.dsh" -> "<volume> · <user>"
+    const i = parts.findIndex((p) => p === "Users" || p === "home" || p === "users");
+    if (i > 0 && parts[i + 1]) return parts[i - 1] + " · " + parts[i + 1];
+    if (parts.length > 1 && last === ".dsh") return parts[parts.length - 2] + " · .dsh";
+    return last;
+  }
+  return last;
+}
+
+const asOs = (v: unknown): imports.SourceOs | null =>
+  v === "linux" || v === "windows" || v === "macos" ? v : (v === "auto" || v == null || v === "" ? null : null);
+
+const viewOf = (s: imports.ImportSource, over: Partial<SourceView> = {}): SourceView => ({
+  id: s.id,
+  label: s.label,
+  os: s.os,
+  path: s.path,
+  imported: true,
+  osAuto: s.osAuto,
+  enabled: s.enabled,
+  addedAt: s.addedAt,
+  lastSyncAt: s.lastSyncAt,
+  error: s.error,
+  scan: s.stats,
+  live: null,
+  ...over,
+});
+
+/** Resolve + scan one registered source (cheap: no trajectory parsing). */
+function scanRegistered(s: imports.ImportSource): { layout: imports.SourceLayout; error: string | null; os: imports.SourceOs } {
+  const layout = imports.resolveSourceLayout(s.path);
+  const error = imports.layoutError(layout);
+  let os = s.os;
+  if (s.osAuto && !error) {
+    const detected = imports.detectSourceOs(layout, imports.sampleCwds(layout, 40));
+    if (detected.os !== "unknown") os = detected.os; // a home that learned what it is
+  }
+  return { layout, error, os };
+}
+
+/**
+ * Every registered source, with a live (cheap) scan. This is what the settings
+ * card lists — it never parses a trajectory, so it stays fast on a big import.
+ */
+export function listImportSources(dshHome: string): SourceView[] {
+  const reg = imports.readSourceRegistry(dshHome);
+  return reg.sources.map((s) => {
+    const { layout, error, os } = scanRegistered(s);
+    return viewOf(s, { os, error, scan: error ? s.stats : imports.scanSource(layout) });
+  });
+}
+
+/** Register a new imported home. Throws with a readable reason when it can't be read. */
+export function addImportSource(dshHome: string, input: { path?: unknown; label?: unknown; os?: unknown }): SourceView {
+  const raw = typeof input.path === "string" ? input.path.trim() : "";
+  if (!raw) throw new Error("a path is required");
+  const layout = imports.resolveSourceLayout(raw);
+  const error = imports.layoutError(layout);
+  if (error) throw new Error(error + ": " + layout.root);
+  const reg = imports.readSourceRegistry(dshHome);
+  const already = reg.sources.find((s) => imports.resolveSourceLayout(s.path).root === layout.root);
+  if (already) throw new Error('that path is already imported as "' + already.label + '"');
+
+  const wanted = asOs(input.os);
+  const detected = imports.detectSourceOs(layout, imports.sampleCwds(layout, 40));
+  const label = (typeof input.label === "string" && input.label.trim()) || defaultSourceLabel(layout);
+  const source: imports.ImportSource = {
+    id: imports.sourceId(label, [...reg.sources.map((s) => s.id), imports.LOCAL_SOURCE_ID]),
+    label,
+    path: layout.root,
+    os: wanted || detected.os,
+    osAuto: !wanted,
+    enabled: true,
+    addedAt: Date.now(),
+    lastSyncAt: Date.now(),
+    error: null,
+    stats: imports.scanSource(layout),
+  };
+  imports.writeSourceRegistry(dshHome, { version: reg.version, sources: [...reg.sources, source] });
+  return viewOf(source);
+}
+
+/** Forget an import (the data on disk is never touched). */
+export function removeImportSource(dshHome: string, id: string): { removed: boolean; dropped: number } {
+  const reg = imports.readSourceRegistry(dshHome);
+  const src = reg.sources.find((s) => s.id === id);
+  if (!src) return { removed: false, dropped: 0 };
+  imports.writeSourceRegistry(dshHome, { version: reg.version, sources: reg.sources.filter((s) => s.id !== id) });
+  const layout = imports.resolveSourceLayout(src.path);
+  const dropped = layout.sessionsRoot ? trajectory.invalidateTrajectoryCache(layout.sessionsRoot) : 0;
+  return { removed: true, dropped };
+}
+
+/** Rename / re-OS / enable / disable a registered import. */
+export function updateImportSource(dshHome: string, id: string, patch: { label?: unknown; os?: unknown; enabled?: unknown }): SourceView {
+  const reg = imports.readSourceRegistry(dshHome);
+  const src = reg.sources.find((s) => s.id === id);
+  if (!src) throw new Error("unknown source: " + id);
+  const next: imports.ImportSource = { ...src };
+  if (typeof patch.label === "string" && patch.label.trim()) next.label = patch.label.trim();
+  if (patch.os !== undefined) {
+    const wanted = asOs(patch.os);
+    next.os = wanted || imports.detectSourceOs(imports.resolveSourceLayout(next.path), imports.sampleCwds(imports.resolveSourceLayout(next.path), 40)).os;
+    next.osAuto = !wanted;
+  }
+  if (typeof patch.enabled === "boolean") next.enabled = patch.enabled;
+  imports.writeSourceRegistry(dshHome, { version: reg.version, sources: reg.sources.map((s) => (s.id === id ? next : s)) });
+  const { layout, error, os } = scanRegistered(next);
+  return viewOf(next, { os, error, scan: error ? next.stats : imports.scanSource(layout) });
+}
+
+/**
+ * RESYNC one import: re-resolve the path, re-detect the OS, re-scan the counts,
+ * and drop its cached trajectory parses so the next report load re-reads the
+ * home from disk. Everything else keeps its warm cache.
+ */
+export function resyncImportSource(dshHome: string, id: string): { source: SourceView; dropped: number } {
+  const reg = imports.readSourceRegistry(dshHome);
+  const src = reg.sources.find((s) => s.id === id);
+  if (!src) throw new Error("unknown source: " + id);
+  const { layout, error, os } = scanRegistered(src);
+  const next: imports.ImportSource = {
+    ...src,
+    os,
+    error,
+    stats: error ? src.stats : imports.scanSource(layout),
+    lastSyncAt: Date.now(),
+  };
+  imports.writeSourceRegistry(dshHome, { version: reg.version, sources: reg.sources.map((s) => (s.id === id ? next : s)) });
+  const dropped = layout.sessionsRoot ? trajectory.invalidateTrajectoryCache(layout.sessionsRoot) : 0;
+  return { source: viewOf(next), dropped };
+}
+
+/** Directories that look like an importable DSH home (the settings card's "Scan"). */
+export function scanImportCandidates(dshHome: string, roots?: string[]): imports.SourceCandidate[] {
+  const reg = imports.readSourceRegistry(dshHome);
+  const self = imports.resolveSourceLayout(dshHome).root;
+  return imports.markKnown(imports.scanForDshHomes(roots), reg.sources).filter((c) => c.path !== self);
 }

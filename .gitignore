@@ -10,3 +10,4 @@ dist/
 # npm does not compile lib/*.ts for a git dependency, so lib/*.js are the shipped artifact.
 # Regenerate them with `npm run build` whenever you edit the lib/*.ts sources.
 !lib/*.js
+package-lock.json

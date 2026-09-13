@@ -114,6 +114,12 @@ console.log("  " + dim("DSH home") + "     : " + dim(report.dshHome));
 console.log("  " + dim("Sessions") + "     : " + fmt(report.sources.projcache.sessions) + " total, " + fmt(report.sources.projcache.nonZero) + " with usage");
 const cache = parseStatsSnapshot();
 console.log("  " + dim("Trajectories") + " : " + fmt(report.sources.trajectories.files) + " files, " + fmt(report.sources.trajectories.withUsage) + " with per-turn usage, " + fmt(report.sources.trajectories.withModelTimeline) + " with model events · parse cache " + fmt(cache.cacheHits) + " hits / " + fmt(cache.recomputed) + " recomputed");
+// Imported homes (other machines / OSes) are folded into every number above;
+// name them, so a total that spans machines is never mistaken for this one's.
+const imported = (report.sources.imported || []).filter((s) => s.live && s.live.sessions > 0);
+if (imported.length) {
+  console.log("  " + dim("Imported") + "     : " + imported.map((s) => s.label + " (" + fmt(s.live.sessions) + " sessions)").join(", "));
+}
 if (days > 0) console.log("  " + dim("Window") + "       : last " + days + " day(s)");
 console.log();
 console.log(bold("  TOTALS GOBLED"));

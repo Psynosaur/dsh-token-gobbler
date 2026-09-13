@@ -119,6 +119,31 @@ test("combinedDrawer + sessionDrawer render a session with a turn timeline", asy
   }
 });
 
+/** Every element of a given component (matched by function name) in a tree. */
+function byType(node, name, out = []) {
+  if (node == null || typeof node !== "object") return out;
+  if (Array.isArray(node)) { for (const n of node) byType(n, name, out); return out; }
+  if (node.props) {
+    if (typeof node.type === "function" && node.type.name === name) out.push(node);
+    byType(node.props.children, name, out);
+  }
+  return out;
+}
+
+test("combinedDrawer wires the perf chart for the dot modes + persisted toggles", async () => {
+  installStubs();
+  const mod = await import(outfile);
+  const el = mod.combinedDrawer(fakeSession(), { defaultClosed: true });
+  assert.deepEqual(badChildren(el), [], "the drawer still renders");
+
+  const chart = byType(el, "GraphCanvas")[0];
+  assert.ok(chart, "the perf panel is drawn by the canvas engine");
+  assert.equal(chart.props.modeChips, true, "the Lines / Both / Dots switch is offered");
+  assert.equal(chart.props.persistKey, "perf", "and its chips + plot mode are remembered for next time");
+  assert.ok(chart.props.chips.length >= 1 && chart.props.metricChips.length === 6, "the togglable chips are wired");
+  assert.equal(chart.props.tipData.length, 3, "one tooltip row per plotted step");
+});
+
 test("drawers render a legacy session with no turn timeline", async () => {
   installStubs();
   const mod = await import(outfile);

@@ -1,6 +1,6 @@
 {
   "name": "token-gobbler",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
   "description": "DSH plugin that gobbles your token usage straight out of session trajectories + projections, then prices it against Copilot's Claude/Grok (and your free local models). Watch the corp tokens get chomped.",
   "license": "MIT",
@@ -25,7 +25,6 @@
     "cordis.patch.yml",
     "lib/**",
     "bin/**",
-    "vendor/**",
     "scripts/**"
   ],
   "dsh": {

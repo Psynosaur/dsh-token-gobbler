@@ -4,17 +4,27 @@
 import { CSS, NS, text, fmt, fmtC, money, fmtMs, statCard, eventChips, toolTable, segBtn, request, humanizeModel, badgeGrid, thL, thR, tdL, tdR } from "./core";
 import { SessionTable } from "./session-table";
 import { aggregateSessions, daySeries as buildDaySeries, dayStr } from "./agg";
-import { combinedDrawer } from "./drawers";
-import { AmBarChart } from "./amchart";
+import { Collapse, combinedDrawer } from "./drawers";
+import { POINT_MODES } from "./graph";
+import { loadChartSettings, subscribeChartSettings } from "./graph-store";
+import { GraphCanvas } from "./graph-canvas";
 import { comparisonTable, sessionTable, dayTable, dayChart, sessionChart, pricingTab, costCard, costModelTable } from "./panels";
 import { DailyTab } from "./daily";
 import { RunsTab } from "./runs";
 import { LlamaMetricsTab } from "./llama-metrics";
 import { useGobblerData, activityRef } from "./hooks";
+import { ChartDefaultsCard } from "./chart-settings";
+import { ImportSourcesCard } from "./import-sources";
+import { SourceFilterBar, hasImports, inSourceFilter, importedSummary, importedSources } from "./sources";
 
 export function TokenGobblerSettings(props: any) {
   const close = props && props.close;
   const { data, error, loading, refreshing, loadData, reprocess, reprocessing, reprocessMsg } = useGobblerData();
+  // The "Chart defaults" drawer head names the plot mode every canvas chart opens
+  // with, so it follows the same store the card writes to. Declared BEFORE the
+  // early returns below — a hook may never be called conditionally.
+  const [chartMode, setChartMode] = React.useState<string>(() => loadChartSettings().mode);
+  React.useEffect(() => subscribeChartSettings(() => setChartMode(loadChartSettings().mode)), []);
 
   if (loading) return jsxs("div", { className: "tg-root", children: [jsx("style", { children: CSS }), jsx("div", { style: { padding: 24, color: "#94a3b8", fontSize: 14 }, children: "Counting the gobbled tokens…" })] });
   if (error && !data) return jsxs("div", { className: "tg-root", children: [jsx("style", { children: CSS }), jsxs("div", { style: { padding: 24 }, children: [jsx("div", { style: { fontWeight: 700 }, children: "Couldn't load token usage" }), jsx("div", { style: { color: "#f87171", marginTop: 6, fontSize: 13 }, children: error })] })] });
@@ -24,10 +34,27 @@ export function TokenGobblerSettings(props: any) {
   const wfh = data.split && data.split.wfh;
   const refLabel = (wfh && wfh.referenceLabel) || "corp";
   const ev = data.events || null;
+  const imp = importedSummary(data.sources);
   const dec = data.decode;
   const byModel = data.byModel || [];
   const fastest = byModel.filter((m: any) => m.tokPerSec != null).sort((a: any, b: any) => b.tokPerSec - a.tokPerSec)[0] || null;
-  const sec = (label: string) => jsx("div", { className: "tg-sec", children: label });
+  // Every group of settings is one collapsible drawer: the head carries the
+  // at-a-glance number (so a closed drawer still says what is inside) and the
+  // cards unfold below it. The imported homes get the LAST drawer on purpose —
+  // this machine's numbers lead, other machines are opt-in reading.
+  const setChip = (label: string, value: any, color: string) => jsxs("span", { className: "tg-set-chip", children: [
+    jsx("span", { className: "tg-stat-dot", style: { background: color } }),
+    jsx("span", { className: "tg-set-chip-l", children: label }),
+    jsx("span", { className: "tg-set-chip-v tg-num", children: value }),
+  ]});
+  const drawer = (title: string, chips: any[], body: any, open = false) => jsx(Collapse, {
+    defaultOpen: open,
+    label: jsxs("span", { className: "tg-set-head", children: [
+      jsx("span", { className: "tg-set-head-t", children: title }),
+      ...chips,
+    ]}),
+    children: jsx("div", { className: "tg-set-body", children: body }),
+  });
   const chip = (label: string, value: any, color: string) => jsxs("div", { className: "tg-chip", children: [
     jsx("span", { className: "tg-stat-dot", style: { background: color } }),
     jsx("span", { className: "tg-chip-label", children: label }),
@@ -63,8 +90,17 @@ export function TokenGobblerSettings(props: any) {
         ]}),
       ]}),
       reprocessMsg ? jsx("div", { className: "tg-faint", style: { fontSize: 11, marginTop: -6 }, children: reprocessMsg }) : null,
-      jsxs("div", { style: { display: "flex", flexDirection: "column", gap: 12 }, children: [
-        sec("💰 Cost — what it adds up to"),
+      // Imported homes are folded into every number on this page — say so, and
+      // which ones, right under the header instead of burying it in a settings card.
+      imp ? jsxs("div", { className: "tg-importline", children: [
+        jsx("span", { className: "tg-importline-ico", children: "🔌" }),
+        jsx("span", { children: imp.text + " folded in — imported sessions carry their home's badge and can be filtered in the activity view." }),
+      ]}) : null,
+      jsxs("div", { className: "tg-set-drawers", children: [
+      drawer("💰 Cost — what it adds up to", [
+        setChip("actually ran", money(data.actual.cost), "#fbbf24"),
+        ...(data.actualSavings > 0 ? [setChip("saved", money(data.actualSavings), "#34d399")] : []),
+      ], [
         jsxs("div", { className: "tg-card tg-hero", children: [
           jsxs("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" }, children: [
             jsx("div", { className: "tg-label", children: "What you actually ran" }),
@@ -74,9 +110,8 @@ export function TokenGobblerSettings(props: any) {
           jsx("div", { style: { color: "#94a3b8", fontSize: 12, marginTop: 9, lineHeight: 1.5 }, children: data.actual.note }),
         ]}),
         wfhCard,
-      ]}),
-      jsxs("div", { style: { display: "flex", flexDirection: "column", gap: 12 }, children: [
-        sec("🪙 Tokens — everything metered"),
+      ], true),
+      drawer("🪙 Tokens — everything metered", [setChip("total", fmtC(t.allTokens), "#fbbf24")], [
         jsx("div", { style: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 12 }, children: [
           statCard("Input (uncached)", t.uncachedInputTokens, "#60a5fa", false),
           statCard("Output", t.outputTokens, "#a78bfa", false),
@@ -84,9 +119,11 @@ export function TokenGobblerSettings(props: any) {
           statCard("Cache write", t.cacheWriteTokens, "#f472b6", false),
           statCard("Total tokens", t.allTokens, "#fbbf24", true),
         ]}),
-      ]}),
-      (dec && dec.tokPerSec != null) ? jsxs("div", { style: { display: "flex", flexDirection: "column", gap: 12 }, children: [
-        sec("⚡ Speed — how fast it ran"),
+      ]),
+      (dec && dec.tokPerSec != null) ? drawer("⚡ Speed — how fast it ran", [
+        setChip("decode", dec.tokPerSec + " tok/s", "#fbbf24"),
+        ...(data.prefill && data.prefill.tokPerSec != null ? [setChip("prefill", data.prefill.tokPerSec + " tok/s", "#2dd4bf")] : []),
+      ], [
         jsx("div", { style: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: 12 }, children: [
           jsxs("div", { className: "tg-card tg-stat", children: [
             jsxs("div", { style: { display: "flex", alignItems: "center", gap: 7 }, children: [
@@ -109,9 +146,11 @@ export function TokenGobblerSettings(props: any) {
               (data.prefill.avgTtftMs != null ? " · avg TTFT " + fmtMs(data.prefill.avgTtftMs) : "") }),
           ]}) : null,
         ]}),
-      ]}) : null,
-      ev ? jsxs("div", { style: { display: "flex", flexDirection: "column", gap: 12 }, children: [
-        sec("📊 Activity — what actually happened"),
+      ]) : null,
+      ev ? drawer("📊 Activity — what actually happened", [
+        setChip("sessions", fmt(data.sources.projcache.sessions), "#60a5fa"),
+        setChip("LLM steps", fmt(ev.steps || 0), "#60a5fa"),
+      ], [
         jsx("div", { className: "tg-chipgrid", children: [
           chip("Sessions", fmt(data.sources.projcache.sessions), "#60a5fa"),
           chip("LLM steps", fmt(ev.steps || 0), "#60a5fa"),
@@ -121,7 +160,21 @@ export function TokenGobblerSettings(props: any) {
           chip("Turns", fmt(ev.turns || 0), "#fbbf24"),
           chip("Compactions", fmt(ev.compactions || 0), "#f472b6"),
         ]}),
-      ]}) : null,
+      ]) : null,
+      // The chart knobs live here rather than in the charts: one place to set
+      // what every canvas chart opens with (see client/chart-settings.tsx).
+      drawer("📈 Chart defaults — trend & heat", [
+        setChip("opens as", (POINT_MODES.find((m) => m.k === chartMode) || { name: String(chartMode) }).name, "#38bdf8"),
+      ], [
+        jsx(ChartDefaultsCard, {}),
+      ]),
+      // Imported DSH homes: add / pause / resync / remove (client/import-sources.tsx).
+      drawer("🔌 Imported sources — other machines & OSes", [
+        setChip(importedSources().length === 1 ? "home" : "homes", String(importedSources().length), "#34d399"),
+      ], [
+        jsx(ImportSourcesCard, { onChanged: loadData }),
+      ]),
+      ]}),
       jsx("div", { className: "tg-faint", style: { fontSize: 11, marginTop: 2 }, children: "sources: " + data.sources.projcache.sessions + " sessions (" + data.sources.projcache.nonZero + " with usage) · " + data.sources.trajectories.files + " trajectories (" + data.sources.trajectories.withUsage + " with per-turn usage, " + data.sources.trajectories.withModelTimeline + " with model events" + (data.sources.trajectories.cache ? " · parse cache " + data.sources.trajectories.cache.hits + " hits / " + data.sources.trajectories.cache.recomputed + " recomputed" : "") + ")" }),
     ],
   });
@@ -130,11 +183,30 @@ export function TokenGobblerSettings(props: any) {
 export function TokenGobblerModal({ onClose, initialTab, initialDay }: { onClose: () => void; initialTab?: string; initialDay?: string | null }) {
   const { data, breakdown, perf, error, loading, refreshing, loadData, reprocess, reprocessing, reprocessMsg } = useGobblerData();
   const [tab, setTab] = React.useState(initialTab || "events");
+  // Which home the tables below are showing: "all" | "local" | <imported id>.
+  const [srcFilter, setSrcFilter] = React.useState("all");
   const [openSession, setOpenSession] = React.useState<string | null>(null);
   const [openToken, setOpenToken] = React.useState<string | null>(null);
   const [pageState, setPageState] = React.useState<any>({});
   const pageFor = (k: string) => pageState[k] || 0;
   const setPageFor = (k: string) => (p: number) => setPageState((s: any) => ({ ...s, [k]: p }));
+  // Sort state for the performance tab session table (persisted to localStorage)
+  const [sortState, setSortState] = React.useState<any>(() => {
+    try {
+      const s = localStorage.getItem("tg:sort:perf-sessions");
+      return s ? JSON.parse(s) : null;
+    } catch {
+      return null;
+    }
+  });
+  const handleSort = React.useCallback((col: any) => {
+    setSortState(col);
+    try {
+      localStorage.setItem("tg:sort:perf-sessions", JSON.stringify(col));
+    } catch {
+      // ignore quota errors
+    }
+  }, []);
   const [pricingData, setPricingData] = React.useState<any>(null);
   const [draft, setDraft] = React.useState<any>(null);
   const [saving, setSaving] = React.useState(false);
@@ -216,7 +288,9 @@ export function TokenGobblerModal({ onClose, initialTab, initialDay }: { onClose
   else if (error && !data) body = jsx("div", { style: { padding: 40, color: "#f87171", textAlign: "center" }, children: error });
   else if (!data) body = jsx("div", { style: { padding: 40, color: "#94a3b8", textAlign: "center" }, children: "No data." });
   else {
-    const bySession = (breakdown && breakdown.bySession) || [];
+    // Every session row, then the same rows narrowed to the active source filter.
+    const allSessions = (breakdown && breakdown.bySession) || [];
+    const bySession = srcFilter === "all" ? allSessions : allSessions.filter((s: any) => inSourceFilter(s, srcFilter));
     const byDay = (breakdown && breakdown.byDay) || [];
     const events = data.events || (breakdown && breakdown.events) || null;
     const tools = data.tools || (breakdown && breakdown.tools) || [];
@@ -323,40 +397,43 @@ export function TokenGobblerModal({ onClose, initialTab, initialDay }: { onClose
     const avg = (tot: number, denom: number) => (denom > 0 ? Math.round(tot / denom) : null);
     // Per-day series for the over-time charts — shared aggregation (client/agg.ts).
     const daySeries = buildDaySeries(bySession);
+    // The canvas engine plots a NUMERIC x, so a day series gets an ordinal and
+    // the tick label carries the date (client/graph.ts xTickFormat).
+    const dayRows = daySeries.map((r: any, i: number) => ({ ...r, n: i }));
+    const dayTick = (v: number) => { const r = dayRows[Math.round(v)]; return r && r.date ? r.date : ""; };
     const overTime = jsxs("div", { style: { display: "flex", flexDirection: "column", gap: 20 }, children: [
       jsxs("div", { children: [
-        jsx("div", { className: "tg-faint", style: { fontSize: 11, marginBottom: 8 }, children: "Daily totals of the token badges (In / Out / Cache / Think / Total) across every session." }),
-        jsx(AmBarChart, {
-          data: daySeries,
-          categoryField: "date",
-          kind: "line",
-          smooth: true,
-          log: true,
-          unit: "tok",
+        jsx("div", { className: "tg-faint", style: { fontSize: 11, marginBottom: 8 }, children: "Daily totals of the token badges (In / Out / Cache / Think / Total) across every session — log axis, since a day's cache reads in millions and a day's thinking in thousands." }),
+        jsx(GraphCanvas, {
+          data: dayRows,
+          xField: "n", xLabel: "day", xTickFormat: dayTick,
           series: [
-            { key: "in", label: "In", color: "#60a5fa", unit: "tok", axis: 0 },
-            { key: "out", label: "Out", color: "#a78bfa", unit: "tok", axis: 0 },
-            { key: "cache", label: "Cache", color: "#2dd4bf", unit: "tok", axis: 0 },
-            { key: "think", label: "Think", color: "#c084fc", unit: "tok", axis: 0 },
-            { key: "total", label: "Total", color: "#fbbf24", unit: "tok", axis: 0 },
+            { key: "in", label: "In", tipName: "in", color: "#60a5fa", unit: "tok", axis: 0, line: true },
+            { key: "out", label: "Out", tipName: "out", color: "#a78bfa", unit: "tok", axis: 0, line: true },
+            { key: "cache", label: "Cache", tipName: "cache", color: "#2dd4bf", unit: "tok", axis: 0, line: true },
+            { key: "think", label: "Think", tipName: "think", color: "#c084fc", unit: "tok", axis: 0, line: true },
+            { key: "total", label: "Total", tipName: "total", color: "#fbbf24", unit: "tok", axis: 0, line: true, width: 2 },
           ],
+          axes: [{ log: true, unit: "tok" }],
+          legendChips: true, legendUnit: "tok",
+          modeChips: true, persistKey: "day-tokens",
           height: 220,
         }),
       ]}),
       jsxs("div", { children: [
         jsx("div", { className: "tg-label", style: { marginBottom: 8 }, children: "📈 Over time — speed" }),
-        jsx("div", { className: "tg-faint", style: { fontSize: 11, marginBottom: 8 }, children: "Daily decode & prefill speed (tok/s) and average TTFT (seconds)." }),
-        jsx(AmBarChart, {
-          data: daySeries,
-          categoryField: "date",
-          kind: "line",
-          smooth: true,
-          unit: "tok/s",
+        jsx("div", { className: "tg-faint", style: { fontSize: 11, marginBottom: 8 }, children: "Daily decode & prefill speed (tok/s) on the left axis; average TTFT (seconds) shares the right log axis, whose labels are dropped — the tooltip carries its value." }),
+        jsx(GraphCanvas, {
+          data: dayRows,
+          xField: "n", xLabel: "day", xTickFormat: dayTick,
           series: [
-            { key: "decode", label: "Decode", color: "#38bdf8", unit: "tok/s", axis: 0 },
-            { key: "prefill", label: "Prefill", color: "#2dd4bf", unit: "tok/s", axis: 0 },
-            { key: "ttft", label: "Avg TTFT", color: "#fbbf24", unit: "s", axis: 1 },
+            { key: "decode", label: "Decode", tipName: "decode", color: "#38bdf8", unit: "tok/s", axis: 0, line: true, fill: true },
+            { key: "prefill", label: "Prefill", tipName: "prefill", color: "#2dd4bf", unit: "tok/s", axis: 0, line: true },
+            { key: "ttft", label: "Avg TTFT", tipName: "TTFT", color: "#fbbf24", unit: "s", axis: 1, line: true },
           ],
+          axes: [{ unit: "tok/s" }, { log: true, hideLabels: true, unit: "s" }],
+          legendChips: true,
+          modeChips: true, persistKey: "day-speed",
           height: 190,
         }),
       ]}),
@@ -399,6 +476,7 @@ export function TokenGobblerModal({ onClose, initialTab, initialDay }: { onClose
           expandedId: openToken, onToggle: setOpenToken,
           drawer: combinedDrawer,
           page: pageFor("combSess"), setPage: setPageFor("combSess"), pageSize: 25,
+          sort: sortState, onSort: handleSort, sortKey: "perf-sessions",
           empty: jsx("div", { className: "tg-muted", style: { fontSize: 13, padding: "12px 4px" }, children: "No combined per-step data yet — appears once sessions record per-turn usage." }),
         }),
       ]}),
@@ -415,7 +493,8 @@ export function TokenGobblerModal({ onClose, initialTab, initialDay }: { onClose
       jsxs("div", { className: "tg-modal-header", children: [
         jsxs("div", { children: [
           jsx("div", { style: { fontSize: 17, fontWeight: 800, letterSpacing: "-0.01em" }, children: "🦃 Token Gobbler — activity" }),
-          jsx("div", { style: { color: "#94a3b8", marginTop: 2, fontSize: 12 }, children: "Events, tools, models and sessions across your whole DSH home." }),
+          jsx("div", { style: { color: "#94a3b8", marginTop: 2, fontSize: 12 }, children: "Events, tools, models and sessions across your whole DSH home."
+            + (importedSummary(data && data.sources) ? " · " + (importedSummary(data && data.sources) as any).text : "") }),
         ]}),
         jsxs("div", { style: { display: "flex", gap: 8 }, children: [
           jsx("button", { className: "tg-ghost", onClick: () => loadData(), disabled: refreshing, children: refreshing ? "Refreshing…" : "↻ Refresh" }),
@@ -425,6 +504,13 @@ export function TokenGobblerModal({ onClose, initialTab, initialDay }: { onClose
       ]}),
       reprocessMsg ? jsx("div", { className: "tg-faint", style: { fontSize: 11, padding: "0 20px 10px" }, children: reprocessMsg }) : null,
       jsx("div", { className: "tg-seg", style: { margin: "0 20px 16px" }, children: [segBtn(tab, setTab, "events", "Overview"), segBtn(tab, setTab, "cost", "Cost"), segBtn(tab, setTab, "performance", "Performance"), segBtn(tab, setTab, "runs", "Runs"), segBtn(tab, setTab, "daily", "Daily"), segBtn(tab, setTab, "llama", "Llama Metrics"), segBtn(tab, setTab, "pricing", "Settings")] }),
+      // One chip per home — only shown once something is actually imported.
+      hasImports() ? jsx("div", { style: { margin: "0 20px 12px" }, children: jsx(SourceFilterBar, {
+        value: srcFilter,
+        onChange: setSrcFilter,
+        rows: (breakdown && breakdown.bySession) || [],
+        compact: true,
+      }) }) : null,
       jsx("div", { className: "tg-modal-body", children: body }),
     ]}),
   ]});

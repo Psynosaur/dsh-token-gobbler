@@ -2,17 +2,7 @@
 // Registers the token-usage HTTP routes on the DSH web server. The client
 // (lib/client.js) renders the settings.section dashboard that calls these.
 import { existsSync } from "node:fs";
-import { readFile } from "node:fs/promises";
-import { join, normalize, extname, sep } from "node:path";
-import { fileURLToPath } from "node:url";
-import { buildReport, buildBreakdown, buildPerformance, loadPricing, savePricing, resolvePaths, discoverModels, discoverModelCards, pricingFilePath, reprocessTrajectories, getCompactionDetail } from "./report.js";
-
-// amCharts 5 is vendored locally (vendor/amcharts) so the token charts render
-// offline instead of failing on a cdn.amcharts.com fetch. Resolve the directory
-// relative to THIS module (lib/index.ts) so it works from the checkout and an
-// installed package alike. Normalize and strip any trailing separator so the
-// served-path containment check compares like-for-like.
-const AMCHARTS_ROOT = normalize(fileURLToPath(new URL("../vendor/amcharts/", import.meta.url))).replace(/[/\\]+$/, "");
+import { buildReport, buildBreakdown, buildPerformance, loadPricing, savePricing, resolvePaths, discoverModels, discoverModelCards, pricingFilePath, reprocessTrajectories, getCompactionDetail, listImportSources, addImportSource, removeImportSource, updateImportSource, resyncImportSource, scanImportCandidates } from "./report.js";
 
 /** Minimal DSH plugin host context (webServer injection container). */
 interface DshContext {
@@ -86,34 +76,6 @@ export function apply(ctx: DshContext, _config: Record<string, unknown> = {}) {
     wctx.effect(() => {
       const disposers: (() => void)[] = [
         wctx.webServer.register({
-          kind: "prefix",
-          path: "/token-gobbler/vendor",
-          handler: async (req, res) => {
-            // Serve a vendored amCharts asset. Resolve the requested relative
-            // path under AMCHARTS_ROOT and refuse anything that escapes it.
-            const urlPath = decodeURIComponent((req.url || "").split("?")[0]);
-            const rel = normalize(urlPath.replace(/^\/token-gobbler\/vendor/, "").replace(/^[/\\]+/, ""));
-            const abs = normalize(join(AMCHARTS_ROOT, rel));
-            const mime: Record<string, string> = {
-              ".js": "text/javascript; charset=utf-8",
-              ".json": "application/json; charset=utf-8",
-            };
-            if (abs !== AMCHARTS_ROOT && !abs.startsWith(AMCHARTS_ROOT + sep)) {
-              res.writeHead(403, { "content-type": "text/plain; charset=utf-8" });
-              res.end("forbidden");
-              return;
-            }
-            try {
-              const data = await readFile(abs);
-              res.writeHead(200, { "content-type": mime[extname(abs)] || "application/octet-stream", "cache-control": "no-store" });
-              res.end(data);
-            } catch {
-              res.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
-              res.end("not found");
-            }
-          },
-        }),
-        wctx.webServer.register({
           kind: "exact",
           path: "/token-gobbler/usage",
           handler: webAction("GET", () => buildReport()),
@@ -168,6 +130,58 @@ export function apply(ctx: DshContext, _config: Record<string, unknown> = {}) {
           kind: "exact",
           path: "/token-gobbler/discover-models",
           handler: webAction("GET", () => discoverModelCards(resolvePaths().dshHome)),
+        }),
+        // ── imported DSH homes (other machines / other OSes) ──────────────
+        // GET  /token-gobbler/sources           -> { sources }
+        // GET  /token-gobbler/sources?scan=1    -> { sources, candidates }
+        // POST /token-gobbler/sources           -> { sources, result } for
+        //      { action: "add" | "remove" | "resync" | "update", ... }
+        // Every mutation answers with the fresh list, so the settings card never
+        // needs a second round trip. Nothing here writes to the imported home.
+        wctx.webServer.register({
+          kind: "prefix",
+          path: "/token-gobbler/sources",
+          handler: async (req, res) => {
+            const home = resolvePaths().dshHome;
+            if (req.method === "GET") {
+              try {
+                const u = new URL(req.url || "", "http://localhost");
+                const value: Record<string, unknown> = { sources: listImportSources(home) };
+                if (u.searchParams.get("scan")) {
+                  const roots = (u.searchParams.get("roots") || "").split(",").map((s) => s.trim()).filter(Boolean);
+                  value.candidates = scanImportCandidates(home, roots.length ? roots : undefined);
+                }
+                sendJson(res, 200, { ok: true, value });
+              } catch (error) {
+                sendJson(res, 500, { ok: false, error: error instanceof Error ? error.message : String(error) });
+              }
+              return;
+            }
+            if (req.method !== "POST") {
+              res.setHeader("allow", "GET, POST");
+              sendJson(res, 405, { ok: false, error: "Use GET or POST" });
+              return;
+            }
+            try {
+              const raw = await readBody(req);
+              const body = raw ? (JSON.parse(raw) as Record<string, unknown>) : {};
+              const action = String(body.action || "");
+              const id = String(body.id || "");
+              let result: unknown;
+              if (action === "add") result = addImportSource(home, body);
+              else if (action === "remove") result = removeImportSource(home, id);
+              else if (action === "resync") result = resyncImportSource(home, id);
+              else if (action === "update") result = updateImportSource(home, id, body);
+              else {
+                sendJson(res, 400, { ok: false, error: "unknown action: " + (action || "(none)") });
+                return;
+              }
+              sendJson(res, 200, { ok: true, value: { result, sources: listImportSources(home) } });
+            } catch (error) {
+              // A rejected add (bad path, already imported) is a client error, not a crash.
+              sendJson(res, 400, { ok: false, error: error instanceof Error ? error.message : String(error) });
+            }
+          },
         }),
         wctx.webServer.register({
           kind: "exact",

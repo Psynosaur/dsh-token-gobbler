@@ -7,7 +7,7 @@ import { fmt, fmtC, money, fmtMs, thL, thR, tdL, tdR, humanizeModel } from "./co
 import { TgTable } from "./table";
 import { sessionCostColumns } from "./session-table";
 import { sessionDrawer } from "./drawers";
-import { AmBarChart } from "./amchart";
+import { GraphCanvas } from "./graph-canvas";
 
 export const realModelTable = (byModel: any[]) => jsx("div", { className: "tg-tscroll tg-vscroll", children: jsxs("table", { className: "tg-table tg-sticky", children: [
   jsx("tr", { children: [thL("Model"), thL("Kind"), thR("Sessions"), thR("In"), thR("Out"), thR("CacheR"), thR("Speed"), thR("Cost")] }),
@@ -188,15 +188,20 @@ export const dayTable = (byDay: any[]) => jsx("div", { className: "tg-tscroll tg
   ] }, d.date)),
 ]})});
 
+// Cost per calendar day — a DISCRETE sum, so it opens in the canvas engine's
+// Bars mode (client/graph.ts): one bar per day, the x axis is the day's ordinal
+// and every tick is labelled with its date. Newest day first, as before.
 export const dayChart = (byDay: any[]) => {
   // Sort by date descending (most recent first)
   const sorted = [...(byDay || [])].sort((a, b) => b.date.localeCompare(a.date));
-  return jsx(AmBarChart, {
-    data: sorted,
-    categoryField: "date",
-    kind: "column",
-    unit: "USD",
-    series: [{ key: "cost", label: "Cost", color: "#fbbf24", unit: "USD" }],
+  const rows = sorted.map((d: any, i: number) => ({ n: i, date: d.date, cost: d.cost ?? 0 }));
+  return jsx(GraphCanvas, {
+    data: rows,
+    xField: "n", xLabel: "day", xStep: Math.max(1, Math.round(rows.length / 8)),
+    xTickFormat: (v: number) => { const r = rows[Math.round(v)]; return r ? r.date : ""; },
+    series: [{ key: "cost", label: "Cost", tipName: "cost", color: "#fbbf24", unit: "USD", axis: 0 }],
+    axes: [{ unit: "USD", format: (v: number) => "$" + (Math.abs(v) >= 100 ? Math.round(v) : Math.round(v * 100) / 100) }],
+    pointMode: "bars", modeChips: true, persistKey: "cost-day",
     height: 200,
   });
 };
@@ -241,13 +246,14 @@ export const sessionChart = (bySession: any[]) => {
     else bySlot.set(label, { label, cost: r.s.cost ?? 0 });
   }
   const data = [...bySlot.values()];
-  return jsx(AmBarChart, {
-    data: data,
-    categoryField: "label",
-    kind: "column",
-    unit: "USD",
-    columnWidth: 42,
-    series: [{ key: "cost", label: "Cost", color: "#fbbf24", unit: "USD" }],
+  const bars = data.map((d: any, i: number) => ({ n: i, label: d.label, cost: d.cost }));
+  return jsx(GraphCanvas, {
+    data: bars,
+    xField: "n", xLabel: "session", xStep: Math.max(1, Math.round(bars.length / 8)),
+    xTickFormat: (v: number) => { const r = bars[Math.round(v)]; return r ? r.label : ""; },
+    series: [{ key: "cost", label: "Cost", tipName: "cost", color: "#fbbf24", unit: "USD", axis: 0 }],
+    axes: [{ unit: "USD", format: (v: number) => "$" + (Math.abs(v) >= 100 ? Math.round(v) : Math.round(v * 100) / 100) }],
+    pointMode: "bars", modeChips: true, persistKey: "cost-session",
     height: 200,
   });
 };

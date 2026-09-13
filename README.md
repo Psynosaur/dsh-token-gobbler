@@ -50,11 +50,53 @@ node bin/token-gobbler.js --days N # time window
 
 ## Web dashboard
 
-Adds a **Token Gobbler** section to the DSH settings modal (a **↻ Refresh** button, plus a **♻
-Reprocess** button that clears the trajectory parse cache and re-parses every historic file), and an
-activity modal with tabs: **Events**, **Cost**, **Models**, **Performance**, **Tokens**,
-**Combined**, **Daily** (a GitHub-style calendar heatmap of token usage per day — hover a day for its
-combined stats, click to filter the per-session table to it), **Sessions**, and **Pricing**.
+Adds a **Token Gobbler** section to the DSH settings modal: a stack of collapsible drawers — **💰
+Cost**, **🪙 Tokens**, **⚡ Speed**, **📊 Activity**, **📈 Chart defaults**, **🔌 Imported sources** —
+where each head carries the number that matters while the cards stay folded away. It holds the **↻
+Refresh** button plus a **♻ Reprocess** button that clears the trajectory parse cache and re-parses
+every historic file. The activity modal (the 🦃 button, bottom right) has tabs: **Overview**,
+**Cost**, **Performance**, **Runs** (sessions grouped by the model that served them, one line per
+metric over the runs, like-for-like — a model is only ever compared against itself), **Daily** (a
+GitHub-style calendar heatmap of token usage per day — hover a day for its combined stats, click to
+filter the per-session table to it), **Llama Metrics** (live llama.cpp server polling) and
+**Settings** (the rate cards).
+
+## Charts
+
+Every chart is drawn by the plugin's own canvas engine (`client/graph.ts` +
+`client/graph-canvas.tsx`) — no chart library is bundled, and none is injected into the host page.
+Each chart opens in one of six plot modes, switched per chart above the plot: **Lines**, **Both**
+(lines plus a dot per point), **Dots** (a scatter), **Trend** (a rolling median/mean/EMA through the
+dots, the raw points left faint behind it), **Bars** (one bar per point, grown from the axis floor —
+for discrete values like a day's cost) and **Heat** (one row per metric, one column per step, shaded
+by value). Legend chips hide a whole group (a compaction window, a home), metric chips hide one
+metric across every group, and the value axes rescale to whatever is left; hiding a metric is also how
+you read two scales that differ by orders of magnitude. Which mode and which chips a chart opens with
+are remembered per chart, and what they open with by default — plus how Trend and Heat behave — is set
+once in **Settings › Token Gobbler › 📈 Chart defaults**.
+
+## Imported sources — other machines & other OSes
+
+Your other boxes count too. **Settings › Token Gobbler › 🔌 Imported sources** registers ANOTHER
+machine's DSH home and folds its sessions into every number — the Windows install on a mounted NTFS
+volume (`/media/<you>/<drive>/Users/<you>/.dsh`), a macOS home on `/Volumes`, a nightly rsync of a
+laptop's `~/.dsh`, or just a copy of its `sessions/` folder.
+
+- **Add** — type the path (or hit **🔍 Scan for DSH homes**, which probes `/mnt`, `/media/<you>`,
+  `/run/media/<you>`, `/Volumes` and your home for the shapes a DSH home takes). The layout is
+  detected (a full home, the `sessions/` folder, a projection store, or a bare tree of trajectories)
+  and the OS is read from the sessions' own cwds — a Windows session says `D:\models\…` no matter
+  where the drive is mounted today.
+- **Marked, everywhere** — every imported session carries its home's badge (🪟/🍎/🐧 + name) in the
+  session tables and drawers, and the activity modal gets a chip row to filter every tab down to one
+  home.
+- **Manage** — **↻ Resync** re-reads that home only (its cached parses are dropped; the rest of the
+  dashboard keeps its warm cache), **⏸ Pause** keeps it registered but out of the totals, **✕ Remove**
+  forgets the import (the files on that machine are never touched).
+- **Read-only and honest** — the registry is `<your dsh home>/token-gobbler/sources.json`; nothing is
+  ever written into an imported home. A session id that exists in two homes is counted once (this
+  machine wins), and a home with trajectories but no projection store still reports: its rows are
+  rebuilt from the trajectory.
 
 ## Turn outline & the event timeline
 
@@ -151,16 +193,19 @@ Edit the `.ts` sources, never the generated `.js`.
 
 ```
 client/*.ts(x)     web dashboard (TypeScript, bundled by esbuild)
+client/graph.ts    the canvas chart engine every chart is drawn by (dependency-free)
 lib/index.ts       host: /token-gobbler/* routes
 lib/trajectory.ts  zstd trajectory reader/parser (v0 + v3) + shape capture
 lib/projcache.ts   projection-store reader
+lib/sources.ts     imported DSH homes: registry, layout + OS detection, scanning
 lib/pricing.ts     rate cards + cost math
 lib/report.ts      aggregate + attribution + pricing
 lib/client.js      GENERATED (esbuild); do not edit
 bin/token-gobbler.js  CLI (pretty/--json/--days/--breakdown)
 scripts/trajectory-shape.js  trajectory shape snapshot/diff CLI
 docs/trajectory-shapes.md    the pinned shape manifest (`npm run report:shape`)
-test/report.test.js   node --test suite
+test/report.test.js   node --test suite (plus sources / trajectory / drawers / graph / settings /
+                      llama-metrics)
 ```
 
 ---
